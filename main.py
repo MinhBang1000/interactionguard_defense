@@ -129,7 +129,7 @@ def ask_percentage(prompt="Enter train percentage (1-100): "):
         print("Invalid input. Please enter an integer from 1 to 100.")
 
 def prepare_test_data_for_mode(test_data, mode_id):
-    if mode_id not in {3, 11, 12, 31, 32, 33, 34, 35, 36, 37, 40, 41, 42, 43, 44}:
+    if mode_id not in {3, 11, 12}:
         return test_data
 
     print("\nPipeline test subset")
@@ -2321,18 +2321,6 @@ def run_detection_menu():
                 ("5", "Run mode 13: L1 -> L3"),
                 ("6", "Run mode 14: L2 -> L3"),
                 ("7", "Run mode 15: L2 -> L1"),
-                ("8", "Run mode 31: L3 V2 only (channel-split CoT)"),
-                ("9", "Run mode 32: L3 V3 only (pre-filter funnel + guided LLM)"),
-                ("10", "Run mode 33: L3 V4 only (evidence-gated verifier)"),
-                ("11", "Run mode 34: L3 V5 only (conservative fallback variant)"),
-                ("12", "Run mode 35: L3 V6 only (compact conservative fallback)"),
-                ("13", "Run mode 36: L3 V7 only (balanced evidence-gated fallback)"),
-                ("14", "Run mode 37: L3 V8 only (pure LLM dual-auditor fusion)"),
-                ("15", "Run mode 40: L3 V10 only (V6-equivalent base-class refactor)"),
-                ("16", "Run mode 41: L3 V11 only (pure LLM-first multi-pass reviewer)"),
-                ("17", "Run mode 42: L3 V12 only (original-prompt pure LLM staged reviewer)"),
-                ("18", "Run mode 43: L3 O1 only (instruction extractor + auditor detector)"),
-                ("19", "Run mode 44: L3 O2 only (single-call channel auditor)"),
                 ("0", "Back"),
             ],
         )
@@ -2353,30 +2341,6 @@ def run_detection_menu():
             run_detection_pipeline_for_mode(14)
         elif choice == "7":
             run_detection_pipeline_for_mode(15)
-        elif choice == "8":
-            run_detection_pipeline_for_mode(31)
-        elif choice == "9":
-            run_detection_pipeline_for_mode(32)
-        elif choice == "10":
-            run_detection_pipeline_for_mode(33)
-        elif choice == "11":
-            run_detection_pipeline_for_mode(34)
-        elif choice == "12":
-            run_detection_pipeline_for_mode(35)
-        elif choice == "13":
-            run_detection_pipeline_for_mode(36)
-        elif choice == "14":
-            run_detection_pipeline_for_mode(37)
-        elif choice == "15":
-            run_detection_pipeline_for_mode(40)
-        elif choice == "16":
-            run_detection_pipeline_for_mode(41)
-        elif choice == "17":
-            run_detection_pipeline_for_mode(42)
-        elif choice == "18":
-            run_detection_pipeline_for_mode(43)
-        elif choice == "19":
-            run_detection_pipeline_for_mode(44)
 
 
 def run_evaluation_menu():
