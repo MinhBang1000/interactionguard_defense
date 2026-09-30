@@ -1,0 +1,237 @@
+device: '1'
+test_mode: 10
+test_modes_file: config/test_modes.yaml
+layer_order:
+- layer1
+- layer2
+- layer3
+std_testing_invalidated_modes:
+- 1
+- 10
+- 11
+- 12
+- 13
+- 15
+layers:
+  layer1:
+    enabled: true
+    type: autoencoder
+    params:
+      bert_model_path: /home/bang/agent_defense/models/std_testing/trial2_seed43/layer1_modernbert
+      ae_model_path: /home/bang/agent_defense/models/std_testing/trial2_seed43/layer1_autoencoder/autoencoder.pth
+      threshold: 0.05
+  layer2:
+    enabled: true
+    type: classifier
+    params:
+      model_path: /home/bang/agent_defense/models/std_testing/trial2_seed43/layer2_deberta
+      threshold: 0.5
+  layer3v4:
+    enabled: true
+    type: llm_v4
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+  layer3v5:
+    enabled: true
+    type: llm_v5
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 256
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+  layer3v6:
+    enabled: true
+    type: llm_v6
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 128
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+  layer3v7:
+    enabled: true
+    type: llm_v7
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 192
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+  layer3v8:
+    enabled: true
+    type: llm_v8
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 64
+      malicious_weight: 0.7
+      benign_weight: 0.3
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+  layer3v10:
+    enabled: true
+    type: llm_v10
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 128
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+  layer3v11:
+    enabled: true
+    type: llm_v11
+    params:
+      model: openai/gpt-4.1-mini
+      backend: openrouter
+      base_url: https://openrouter.ai/api/v1
+      threshold: 0.5
+      max_retries: 3
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+      max_tokens_general: 96
+      max_tokens_counter: 96
+      max_tokens_prompt: 72
+      temperature_general: 0.0
+      temperature_counter: 0.0
+      temperature_prompt: 0.0
+      malicious_confidence_threshold: 0.85
+      prompt_confidence_threshold: 0.85
+      reviewer_model: openai/gpt-4.1-mini
+      prompt_specialist_model: openai/gpt-4.1-mini
+      always_run_prompt_specialist: true
+      max_prompt_chars: 3000
+      max_block_chars: 1500
+      max_blocks_per_channel: 4
+      parallel_workers: 8
+  layer3v12:
+    enabled: true
+    type: llm_v12
+    params:
+      model: openai/gpt-4.1-mini
+      backend: openrouter
+      base_url: https://openrouter.ai/api/v1
+      threshold: 0.5
+      max_retries: 3
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+      max_tokens_general: 96
+      max_tokens_attack: 96
+      max_tokens_benign: 96
+      temperature_general: 0.0
+      temperature_attack: 0.0
+      temperature_benign: 0.0
+      malicious_confidence_threshold: 0.7
+      challenger_confidence_threshold: 0.68
+      benign_reviewer_threshold: 0.72
+      attack_model: openai/gpt-4.1-mini
+      benign_reviewer_model: openai/gpt-4.1-mini
+      max_prompt_chars: 2800
+      max_block_chars: 1200
+      max_blocks_per_channel: 4
+      parallel_workers: 8
+  layer3v3:
+    enabled: true
+    type: llm_v3
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+  layer3v2:
+    enabled: true
+    type: llm_v2
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      prompt_early_exit_threshold: 0.85
+  layer3orig:
+    enabled: true
+    type: llm_original
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+  layer3o1:
+    enabled: true
+    type: llm_o1
+    params:
+      model: openai/gpt-4.1-mini
+      backend: openrouter
+      base_url: https://openrouter.ai/api/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 160
+      max_tokens_extractor: 384
+      max_tokens_auditor: 256
+      temperature: 0.0
+      max_prompt_chars: 2800
+      max_block_chars: 2200
+      max_blocks_per_channel: 4
+      max_candidates: 8
+  layer3o2:
+    enabled: true
+    type: llm_o2
+    params:
+      model: openai/gpt-4.1-mini
+      backend: openrouter
+      base_url: https://openrouter.ai/api/v1
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 192
+      temperature: 0.0
+      max_prompt_chars: 1800
+      max_block_chars: 1200
+      max_blocks_per_channel: 2
+      parallel_workers: 1
+  layer3:
+    enabled: true
+    type: llm
+    params:
+      model: llama3.1:8b
+      backend: ollama
+      base_url: http://140.113.24.231:11434/v1
+      threshold: 0.5
+      max_retries: 3
+      memorize_test_labels: false
+      memory_path: data/processed/test_processed.jsonl
+      use_llm_fallback: true
+output:
+  save_predictions: true
+  save_visualization_data: true
+  save_per_sample_results: false

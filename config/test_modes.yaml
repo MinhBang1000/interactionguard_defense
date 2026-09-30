@@ -1,0 +1,88 @@
+# ============================================================================
+# FILE: config/test_modes.yaml
+# Test mode configurations for multi-layer detection evaluation
+# ============================================================================
+
+# Test modes define different evaluation strategies
+# Each mode specifies which layers to use and how to combine them
+
+test_modes:
+  # =========================================================================
+  # Individual Layer Tests (test each layer alone on full test set)
+  # =========================================================================
+  
+  1:
+    name: "layer1_only"
+    description: "Test Layer 1 (Autoencoder) alone on full test set"
+    layers: ["layer1"]
+    strategy: "individual"
+    enabled: true
+  
+  2:
+    name: "layer2_only"
+    description: "Test Layer 2 (Classifier) alone on full test set"
+    layers: ["layer2"]
+    strategy: "individual"
+    enabled: true
+  
+  3:
+    name: "layer3_only"
+    description: "Test Layer 3 alone on full test set"
+    layers: ["layer3"]
+    strategy: "individual"
+    enabled: true
+  
+  # =========================================================================
+  # Sequential Chained Tests (Layer N+1 gets predictions==1 from Layer N)
+  # =========================================================================
+  
+  10:
+    name: "layer1_to_layer2"
+    description: "Sequential: Layer 1 screens → Layer 2 confirms suspicious samples"
+    layers: ["layer1", "layer2"]
+    strategy: "chained"
+    chaining_rule: "malicious_only"  # Next layer only gets predictions==1
+    enabled: true
+  
+  11:
+    name: "layer1_to_layer2_to_layer3"
+    description: "Sequential: Layer 1 → Layer 2 → Layer 3 (full chain)"
+    layers: ["layer1", "layer2", "layer3"]
+    strategy: "chained"
+    chaining_rule: "malicious_only"
+    enabled: true
+  
+  12:
+    name: "layer2_to_layer1_to_layer3"
+    description: "Sequential: L2 → L1 → L3 (reversed order for RQ2)"
+    layers: ["layer2", "layer1", "layer3"]
+    strategy: "chained"
+    chaining_rule: "malicious_only"
+    enabled: true
+
+  13:
+    name: "layer1_to_layer3"
+    description: "Sequential: Layer 1 screens suspicious samples, then Layer 3 audits them"
+    layers: ["layer1", "layer3"]
+    strategy: "chained"
+    chaining_rule: "malicious_only"
+    enabled: true
+
+  14:
+    name: "layer2_to_layer3"
+    description: "Sequential: Layer 2 filters known attacks, then Layer 3 audits residual samples"
+    layers: ["layer2", "layer3"]
+    strategy: "chained"
+    chaining_rule: "malicious_only"
+    enabled: true
+
+  15:
+    name: "layer2_to_layer1"
+    description: "Sequential: Layer 2 filters known attacks, then Layer 1 audits remaining samples"
+    layers: ["layer2", "layer1"]
+    strategy: "chained"
+    chaining_rule: "malicious_only"
+    enabled: true
+
+# Default test mode (if not specified)
+default_mode: 10

@@ -1,0 +1,122 @@
+# ============================================================================
+# FILE: config/detection_config.yaml
+# Main detection configuration with test mode support
+# ============================================================================
+
+# Device for local ML layers (Layer 1 / Layer 2).
+# Set CUDA_DEVICE_ML in .env to 0, 1, cuda:0, cuda:1, or cpu.
+# Ollama GPU placement is controlled by the Ollama server, not this client config.
+device: "${CUDA_DEVICE_ML}"
+
+# Test mode selection
+test_mode: 10  # Select mode ID from test_modes.yaml (10 = layer1_to_layer2)
+
+# Path to test modes configuration
+test_modes_file: "config/test_modes.yaml"
+
+# Layer execution order (used for fallback if test_mode not specified)
+layer_order:
+  - "layer1"
+  - "layer2"
+  - "layer3"
+
+# Optional global override for modes that use logical "layer3".
+# Leave unset/default for current behavior (resolves to O2), or set to "orig"
+# or "o2" explicitly.
+# layer3_variant: "o2"
+
+# ----------------------------------------------------------------------------
+# Std Testing invalidation list (experiments/std_testing/evaluate.py)
+#
+# 2026-09-17: layers.layer1.params.threshold was corrected from 0.01 to 0.05
+# (0.01 was a leftover value from a different experiment; 0.05 is the value
+# that reproduces the reference Table 6.4 numbers exactly). Every Std Testing
+# mode that routes through Layer 1 was evaluated with the wrong threshold and
+# must be re-run. Modes 2, 3, 14 never touch Layer 1 and are unaffected.
+#
+# Any mode ID listed here is treated by Phase 2 as unconditionally stale: it
+# is re-run and overwritten for every trial regardless of whether a result
+# file already exists, without needing to overwrite the still-valid modes
+# too. Clear this list (set to []) once all 5 trials have been re-run with
+# the corrected threshold.
+# ----------------------------------------------------------------------------
+std_testing_invalidated_modes: [1, 10, 11, 12, 13, 15]
+
+# Layer configurations
+layers:
+  # Layer 1: Autoencoder
+  layer1:
+    enabled: true
+    type: "autoencoder"
+    params:
+      bert_model_path: "models/layer1/answerdotai_ModernBERT-base_finetuned"
+      ae_model_path: "models/layer1/autoencoder.pth"
+      threshold: 0.05 
+      
+      # 0.01 
+      # 0.03  # Isolation train_pct_075 best: recall=0.9643, F1=0.8438, L3 ratio=0.0206
+      # 0.10 (optimal, most evaluation) / 0.14 / 0.19 (only for high benign sweep)
+      # 0.05 for configuartion test
+      # 0.20 for latency test
+
+  # Layer 2: Fine-tuned BERT Classifier
+  layer2:
+    enabled: true
+    type: "classifier"
+    params:
+      model_path: "models/layer2/protectai_deberta_v3_base_prompt_injection_v2" #"models/layer2/sentinel_prompt_injection" # "models/layer2/protectai_deberta_v3_base_prompt_injection_v2" #"models/layer1/answerdotai_ModernBERT-base_finetuned"
+      threshold: 0.5 # 0.65 # 0.3 # 0.8 cho banking, workspace
+
+  # Layer 3 Original: legacy pure-LLM detector exposed as an explicit variant
+  layer3orig:
+    enabled: true
+    type: "llm_original"
+    params:
+      model: "llama3.1:8b"
+      backend: "ollama"
+      base_url: "http://140.113.24.231:11434/v1"
+      threshold: 0.5
+      max_retries: 3
+
+  # Layer 3 O2: single-call channel auditor
+  layer3o2:
+    enabled: true
+    type: "llm_o2"
+    params:
+      model: "openai/gpt-4.1-mini" #"llama3.1:8b"
+      backend: "openrouter" #"ollama"
+      base_url: "https://openrouter.ai/api/v1" # "http://140.113.24.231:11434/v1"
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 192
+      temperature: 0.0
+      max_prompt_chars: 1800
+      max_block_chars: 1200
+      max_blocks_per_channel: 2
+      parallel_workers: 1
+
+  # Layer 3 (unversioned "layer3" key): resolves to Layer3DetectorO2 in
+  # pipeline.py's cls_map. Params intentionally mirror layer3o2 above so an
+  # unconfigured/no-variant pipeline run behaves identically to the explicit
+  # "o2" path used by every real experiment in this project.
+  layer3:
+    enabled: true
+    type: "llm_o2"
+    params:
+      model: "openai/gpt-4.1-mini"
+      backend: "openrouter"
+      base_url: "https://openrouter.ai/api/v1"
+      threshold: 0.5
+      max_retries: 3
+      max_tokens: 192
+      temperature: 0.0
+      max_prompt_chars: 1800
+      max_block_chars: 1200
+      max_blocks_per_channel: 2
+      parallel_workers: 1
+
+# Output configuration
+output:
+  save_predictions: true
+  save_visualization_data: true
+  save_per_sample_results: false  # Set true for debugging

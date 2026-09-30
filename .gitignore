@@ -1,0 +1,176 @@
+# ============================================================================
+# Agent Defense .gitignore
+# Ignore generated data, experiment artifacts, caches, and local environment
+# files while keeping source code, configs, docs, and lightweight metadata.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Python cache and bytecode
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Virtual environments and local env files
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+venv/
+.venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------------------
+# Editor / IDE / OS noise
+# ---------------------------------------------------------------------------
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Notebook and interactive cache
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Build and packaging artifacts
+# ---------------------------------------------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+*.manifest
+*.spec
+
+# ---------------------------------------------------------------------------
+# Logs and temp files
+# ---------------------------------------------------------------------------
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.old
+
+# ---------------------------------------------------------------------------
+# Data artifacts
+# Keep only code under data/, ignore all generated or collected datasets.
+# ---------------------------------------------------------------------------
+data/raw/
+data/splits/
+data/processed/
+data/predicted/
+data/**/*.json
+data/**/*.jsonl
+data/**/*.csv
+data/**/*.tsv
+data/**/*.parquet
+data/**/*.npy
+data/**/*.npz
+!data/*.py
+!data/**/*.py
+
+# ---------------------------------------------------------------------------
+# Evaluation outputs
+# Keep evaluation scripts, ignore generated reports.
+# ---------------------------------------------------------------------------
+eval/*.json
+eval/*.jsonl
+eval/*.csv
+eval/*.png
+
+# ---------------------------------------------------------------------------
+# Model artifacts and checkpoints
+# Keep source code, ignore learned weights and tokenizer/runtime artifacts.
+# ---------------------------------------------------------------------------
+models/layer1/
+models/layer1_version_*/
+models/layer2/
+models/layer2_version_*/
+models/layer3/
+models/**/*.pt
+models/**/*.pth
+models/**/*.pkl
+models/**/*.bin
+models/**/*.safetensors
+models/**/*.ckpt
+models/**/*.onnx
+models/**/*.gguf
+models/**/*.ggml
+models/**/training_args.bin
+models/**/training_config.json
+models/**/config.json
+models/**/tokenizer.json
+models/**/tokenizer_config.json
+models/**/special_tokens_map.json
+models/**/generation_config.json
+models/**/vocab.txt
+models/**/merges.txt
+models/**/checkpoint-*/
+models/**/embedding_vector/
+models/baseline/*.json
+models/baseline/*.jsonl
+!models/**/*.py
+!models/**/__init__.py
+
+# ---------------------------------------------------------------------------
+# Result artifacts
+# Keep plotting code, ignore generated figures and exported summaries.
+# ---------------------------------------------------------------------------
+results/*
+!results/__init__.py
+!results/issue_figure_generation.py
+results/**/*.json
+results/**/*.jsonl
+results/**/*.csv
+results/**/*.png
+results/**/*.svg
+results/**/*.pdf
+results/**/*.pt
+results/**/*.pth
+results/**/*.pkl
+results/**/*.bin
+results/**/*.safetensors
+results/**/*.ckpt
+results/**/*.npy
+results/**/*.npz
+results/checkpoints/
+results/metrics/
+!results/**/*.py
+!results/**/__init__.py
+
+# ---------------------------------------------------------------------------
+# Training runs and experiment outputs
+# ---------------------------------------------------------------------------
+outputs/
+runs/
+mlruns/
+mlartifacts/
+wandb/
+backups/
+
+# ---------------------------------------------------------------------------
+# Visualization export directories
+# ---------------------------------------------------------------------------
+confusion_matrices/
+
+# ---------------------------------------------------------------------------
+# Misc local files
+# ---------------------------------------------------------------------------
+.codex
+updated_results.md
+updated_results.pdf
