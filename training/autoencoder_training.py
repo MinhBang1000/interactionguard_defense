@@ -46,12 +46,13 @@ np.random.seed(config.SEED)
 # DATA
 # ============================================================================
 
-train_data = load_jsonl(config.PROCESSED_DIR / config.TRAIN_FILE)
-val_data   = load_jsonl(config.PROCESSED_DIR / config.VAL_FILE)
 test_data  = load_jsonl(config.PROCESSED_DIR / config.TEST_FILE)
 
-train_benign = [d for d in train_data if d["label"] == 0]
-val_benign   = [d for d in val_data if d["label"] == 0]
+from data.prepare_training import load_prepared
+train_benign = load_prepared("autoencoder", "train", output_dir=config.TRAINING_DATA_DIR.parent,
+                              expected_path=config.TRAINING_DATA_DIR / config.TRAIN_FILE)
+val_benign = load_prepared("autoencoder", "val", output_dir=config.TRAINING_DATA_DIR.parent,
+                            expected_path=config.TRAINING_DATA_DIR / config.VAL_FILE)
 
 
 # ============================================================================

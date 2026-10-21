@@ -302,12 +302,13 @@ class AutoEncoderConfig:
 
     # === Paths ===
     PROCESSED_DIR = PROCESSED_DIR
+    TRAINING_DATA_DIR = PROCESSED_DIR.parent / "training" / "autoencoder"
     MODEL_DIR = MODEL_LAYER1_DIR
     OUTPUT_DIR = STAGE2_DIR
 
     # === Data files ===
-    TRAIN_FILE = "train_processed.jsonl"
-    VAL_FILE = "val_processed.jsonl"
+    TRAIN_FILE = "train.jsonl"
+    VAL_FILE = "val.jsonl"
     TEST_FILE = "test_processed.jsonl"
 
     # === Fine-tuned embedding model (Stage 1 output) ===
@@ -353,9 +354,9 @@ class ModernBERTConfig:
     # ================================
     # Data
     # ================================
-    DATA_DIR = PROCESSED_DIR
-    TRAIN_FILE = "train_processed.jsonl"
-    VAL_FILE = "val_processed.jsonl"
+    DATA_DIR = PROCESSED_DIR.parent / "training" / "encoder"
+    TRAIN_FILE = "train.jsonl"
+    VAL_FILE = "val.jsonl"
 
     OUTPUT_DIR = MODERNBERT_DIR
 

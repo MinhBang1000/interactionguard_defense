@@ -174,3 +174,6 @@ confusion_matrices/
 .codex
 updated_results.md
 updated_results.pdf
+
+# Local documents, paper drafts and handoff packages (never pushed)
+docs/

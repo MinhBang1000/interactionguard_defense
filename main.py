@@ -568,6 +568,8 @@ def run_detection_pipeline():
         return_details=True,
     )
     print_results(results)
+    from eval.asr import attach_prediction_provenance
+    attach_prediction_provenance(results, test_data, PROCESSED_DIR / "test_processed.jsonl")
     save_results(results, out_dir / f"mode_{mode_id}{layer3_variant_suffix(layer3_variant)}_results.json")
 
 
@@ -597,6 +599,8 @@ def run_detection_pipeline_for_mode(mode_id, layer3_variant=None, prompt_layer3_
         return_details=True,
     )
     print_results(results)
+    from eval.asr import attach_prediction_provenance
+    attach_prediction_provenance(results, test_data, test_path)
     save_results(results, out_dir / f"mode_{mode_id}{layer3_variant_suffix(layer3_variant)}_results.json")
 
 def run_distribution_sweep(mode_id=11, fixed_threshold=0.14, repeats=3, layer3_variant=None):
@@ -1927,7 +1931,8 @@ def run_without_defense_other_eval():
     filter_attack_type()
 
 def run_within_defense_eval():
-    eval_with_defense()
+    source = input("Defense prediction filename under results/ [mode_11_o2_results.json]: ").strip()
+    eval_with_defense(source_predict_path=source or "mode_11_o2_results.json")
     eval_with_baseline()
     
 
@@ -1937,7 +1942,7 @@ def run_figure_generation():
 def run_fine_tune_modermBERT():
     from config.config import ModernBERTConfig
     print_header("LAYER 1 ENCODER FINE-TUNING")
-    print("Choose how much of train_processed.jsonl to use for ModernBERT encoder training.\n")
+    print("Choose how much of prepared data/training/encoder/train.jsonl to use.\n")
     print(f"CUDA devices from config: {ModernBERTConfig.CUDA_VISIBLE_DEVICES}\n")
     percent = ask_percentage()
     env = os.environ.copy()
@@ -2239,11 +2244,16 @@ def run_baseline_eval():
 
 def confirm_data_regeneration(scope):
     print("\nThis will overwrite generated data artifacts.")
+    print("A verified ZIP snapshot of current data/ and eval/ will be created first.")
     if scope in {"split", "all"}:
         print("Affected: data/splits/train.jsonl, val.jsonl, test.jsonl")
     if scope in {"preprocess", "all"}:
         print("Affected: data/processed/train_processed.jsonl, val_processed.jsonl, test_processed.jsonl")
+    if scope in {"preprocess", "training", "all"}:
+        print("Affected: fixed encoder/AutoEncoder train and validation files under data/training/")
     print("Raw files under data/raw/ will not be changed by this menu action.")
+    if scope in {"preprocess", "all"}:
+        print("Then: local tests, validation and no-defense ASR; no training or LLM calls.")
 
     answer = input("Type YES to continue: ").strip()
     if answer != "YES":
@@ -2263,7 +2273,7 @@ def run_data_split_step():
     if not confirm_data_regeneration("split"):
         return
     print_header("REGENERATE DATA SPLITS")
-    run_python_module("data.data_split")
+    subprocess.run([sys.executable, "-m", "data.workflow", "--scope", "split"], check=True)
     print("\nData splits regenerated from data/raw/.")
 
 
@@ -2271,7 +2281,7 @@ def run_data_preprocess_step():
     if not confirm_data_regeneration("preprocess"):
         return
     print_header("REGENERATE PROCESSED DATA")
-    run_python_module("data.data_preprocess")
+    subprocess.run([sys.executable, "-m", "data.workflow", "--scope", "preprocess"], check=True)
     print("\nProcessed data regenerated from data/splits/.")
 
 
@@ -2279,9 +2289,14 @@ def run_full_data_regeneration():
     if not confirm_data_regeneration("all"):
         return
     print_header("FULL DATA REGENERATION")
-    run_python_module("data.data_split")
-    run_python_module("data.data_preprocess")
+    run_python_module("data.workflow")
     print("\nData splits and processed files regenerated from current data/raw/.")
+
+
+def run_training_data_preparation():
+    if not confirm_data_regeneration("training"):
+        return
+    subprocess.run([sys.executable, "-m", "data.workflow", "--scope", "training"], check=True)
 
 
 def run_data_preparation_menu():
@@ -2292,6 +2307,7 @@ def run_data_preparation_menu():
                 ("1", "Regenerate splits from data/raw"),
                 ("2", "Regenerate processed files from data/splits"),
                 ("3", "Full regenerate: raw -> splits -> processed"),
+                ("4", "Prepare fixed encoder/AutoEncoder training data from processed"),
                 ("0", "Back"),
             ],
         )
@@ -2305,6 +2321,8 @@ def run_data_preparation_menu():
                 run_data_preprocess_step()
             elif choice == "3":
                 run_full_data_regeneration()
+            elif choice == "4":
+                run_training_data_preparation()
         except subprocess.CalledProcessError as exc:
             print(f"\nData preparation failed with exit code {exc.returncode}.")
 
@@ -2348,24 +2366,36 @@ def run_evaluation_menu():
         choice = ask_choice(
             "EVALUATIONS",
             [
-                ("1", "Prompt attacks without defense (LLM judge)"),
+                ("1", "Prompt attacks without defense (Llama 3.1 8B judge)"),
                 ("2", "All attacks without defense"),
                 ("3", "Defense and baseline ASR reports"),
                 ("4", "Baseline-only ASR report"),
+                ("5", "Shared timing-aware ASR evaluator (choose predictions)"),
                 ("0", "Back"),
             ],
         )
 
         if choice == "0":
             return
-        if choice == "1":
-            run_without_defense_prompt_injection_eval()
-        elif choice == "2":
-            run_without_defense_other_eval()
-        elif choice == "3":
-            run_within_defense_eval()
-        elif choice == "4":
-            run_baseline_eval()
+        try:
+            if choice == "1":
+                if input("Call local Llama judge for prompt episodes? [y/N]: ").strip().lower() == "y":
+                    run_without_defense_prompt_injection_eval()
+            elif choice == "2":
+                run_without_defense_other_eval()
+            elif choice == "3":
+                run_within_defense_eval()
+            elif choice == "4":
+                run_baseline_eval()
+            elif choice == "5":
+                from eval.asr import main as run_asr
+                path = input("Prediction JSON/JSONL path (empty = no defense): ").strip()
+                extra = ["--predictions", path] if path else []
+                if path and input("Acknowledge unverified legacy predictions? [y/N]: ").strip().lower() == "y":
+                    extra.append("--allow-unverified-predictions")
+                run_asr(extra)
+        except (ValueError, OSError) as exc:
+            print(f"ASR not completed: {exc}")
 
 
 def run_training_menu():

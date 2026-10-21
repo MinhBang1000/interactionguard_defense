@@ -75,8 +75,11 @@ def run(train_percent: int | None = None):
     if not 0 < train_ratio <= 1:
         raise ValueError("train_percent must be between 1 and 100")
 
-    train_data = load_jsonl(config.DATA_DIR / config.TRAIN_FILE)
-    val_data = load_jsonl(config.DATA_DIR / config.VAL_FILE)
+    from data.prepare_training import load_prepared
+    train_data = load_prepared("encoder", "train", output_dir=config.DATA_DIR.parent,
+                               expected_path=config.DATA_DIR / config.TRAIN_FILE)
+    val_data = load_prepared("encoder", "val", output_dir=config.DATA_DIR.parent,
+                             expected_path=config.DATA_DIR / config.VAL_FILE)
     if not train_data:
         raise ValueError(f"Empty training file: {config.DATA_DIR / config.TRAIN_FILE}")
     if not val_data:
