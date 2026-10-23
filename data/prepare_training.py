@@ -79,7 +79,7 @@ def load_prepared(stage, split, *, output_dir=OUTPUT_DIR, expected_path=None):
     output_dir = Path(output_dir)
     manifest_path = output_dir / "manifest.json"
     if not manifest_path.exists():
-        raise ValueError("Prepared training data missing. Run Data preparation 10 -> 3 (or 10 -> 4).")
+        raise ValueError("Prepared training data missing. Run Data preparation 10 -> 3 (or 10 -> 5).")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (manifest.get("version") != MANIFEST_VERSION or manifest.get("preprocessing_version") != VERSION
             or manifest.get("policy_version") != POLICY_VERSION):
@@ -90,7 +90,7 @@ def load_prepared(stage, split, *, output_dir=OUTPUT_DIR, expected_path=None):
         raise ValueError("Training path must match the prepared manifest; regenerate data instead of bypassing it")
     source = manifest["sources"][split]
     if not Path(source["path"]).exists() or sha256(Path(source["path"])) != source["sha256"]:
-        raise ValueError("Processed source changed since training-data preparation; rerun 10 -> 3/4")
+        raise ValueError("Processed source changed since training-data preparation; rerun 10 -> 3/5")
     artifact = manifest["artifacts"][relative]
     if not path.exists() or sha256(path) != artifact["sha256"]:
         raise ValueError(f"Prepared training file missing or modified: {path}")

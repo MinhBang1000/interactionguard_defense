@@ -49,9 +49,9 @@ layers:
     enabled: true
     type: "autoencoder"
     params:
-      bert_model_path: "models/layer1/answerdotai_ModernBERT-base_finetuned"
-      ae_model_path: "models/layer1/autoencoder.pth"
-      threshold: 0.05 
+      bert_model_path: "/home/bang/agent_defense/models/layer1/training_runs/long_context_20261021/encoder"
+      ae_model_path: "/home/bang/agent_defense/models/layer1/training_runs/long_context_20261021/autoencoder/lr_0.0003_latent_64/autoencoder.pth"
+      threshold: 0.2571541368961334
       
       # 0.01 
       # 0.03  # Isolation train_pct_075 best: recall=0.9643, F1=0.8438, L3 ratio=0.0206
@@ -59,12 +59,15 @@ layers:
       # 0.05 for configuartion test
       # 0.20 for latency test
 
-  # Layer 2: Fine-tuned BERT Classifier
+  # Layer 2: Original frozen HF ProtectAI, source-channel windows + OR
   layer2:
     enabled: true
     type: "classifier"
     params:
-      model_path: "models/layer2/protectai_deberta_v3_base_prompt_injection_v2" #"models/layer2/sentinel_prompt_injection" # "models/layer2/protectai_deberta_v3_base_prompt_injection_v2" #"models/layer1/answerdotai_ModernBERT-base_finetuned"
+      model_path: "protectai/deberta-v3-base-prompt-injection-v2"
+      revision: "90c9989b1a342275dd0d1a95aad283c04e075671"
+      channel_wise: true
+      window_overlap: 64
       threshold: 0.5 # 0.65 # 0.3 # 0.8 cho banking, workspace
 
   # Layer 3 Original: legacy pure-LLM detector exposed as an explicit variant

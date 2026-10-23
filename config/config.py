@@ -17,6 +17,7 @@
 # ============================================================================
 from pathlib import Path
 import os
+import json
 import torch
 from dotenv import load_dotenv
 from utils.random_seed import SEED
@@ -27,6 +28,11 @@ from pathlib import Path
 from utils.paths import PROCESSED_DIR
 
 load_dotenv()
+
+
+def selected_layer1_config():
+    path = Path(__file__).parent / "layer1_best.json"
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def cuda_visible_devices(env_name: str = "CUDA_DEVICE_ML", default: str = "0") -> str:
@@ -312,13 +318,16 @@ class AutoEncoderConfig:
     TEST_FILE = "test_processed.jsonl"
 
     # === Fine-tuned embedding model (Stage 1 output) ===
-    FINETUNED_MODEL_PATH = MODERNBERT_DIR
+    FINETUNED_MODEL_PATH = Path(selected_layer1_config().get("encoder_path", str(MODERNBERT_DIR)))
+    SEARCH_LEARNING_RATES = [1e-3, 3e-4]
+    SEARCH_LATENT_DIMS = [32, 64]
+    CALIBRATION_RECALL_FLOOR = 0.98
 
     def __init__(self):
 
         # Load Stage 1 training configuration
         self.BERT_MODEL_NAME = "answerdotai/ModernBERT-base"
-        self.MAX_LENGTH = 2048
+        self.MAX_LENGTH = 8192
         self.TRUST_REMOTE_CODE = True
 
         # === Autoencoder Architecture ===
@@ -330,7 +339,7 @@ class AutoEncoderConfig:
         # === Training ===
         self.EPOCHS = 50
         self.BATCH_SIZE = 128
-        self.LEARNING_RATE = 1e-3
+        self.LEARNING_RATE = 3e-4
         self.WEIGHT_DECAY = 1e-5
 
         # === Early stopping ===
@@ -339,6 +348,12 @@ class AutoEncoderConfig:
 
         # === Random seed ===
         self.SEED = 42
+
+        selected = selected_layer1_config().get("autoencoder", {})
+        self.HIDDEN_DIMS = selected.get("hidden_dims", self.HIDDEN_DIMS)
+        self.LATENT_DIM = selected.get("latent_dim", self.LATENT_DIM)
+        self.DROPOUT = selected.get("dropout", self.DROPOUT)
+        self.LEARNING_RATE = selected.get("learning_rate", self.LEARNING_RATE)
 
         # Ensure output directory exists
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -349,7 +364,11 @@ class ModernBERTConfig:
     # Model
     # ================================
     MODEL_NAME = "answerdotai/ModernBERT-base"
-    MAX_LENGTH = 2048
+    MAX_LENGTH = 8192
+    PRECISION = "bf16"
+    PADDING = "dynamic"
+    CLASSIFIER_POOLING = "cls"
+    GRADIENT_CHECKPOINTING = True
 
     # ================================
     # Data
@@ -360,7 +379,7 @@ class ModernBERTConfig:
 
     OUTPUT_DIR = MODERNBERT_DIR
 
-    TRAIN_RATIO = 0.25   # control training data amount # good at 25%
+    TRAIN_RATIO = 1.0
     CUDA_VISIBLE_DEVICES = cuda_visible_devices("CUDA_DEVICE_ML", "0")
 
     # ================================
@@ -382,10 +401,10 @@ class ModernBERTConfig:
     # ================================
     # Evaluation
     # ================================
-    EVAL_STRATEGY = "steps"
-    EVAL_STEPS = 500
+    EVAL_STRATEGY = "epoch"
+    EVAL_STEPS = None
 
-    SAVE_STEPS = 500
+    SAVE_STEPS = None
     SAVE_TOTAL_LIMIT = 2
 
     METRIC_FOR_BEST_MODEL = "f1"

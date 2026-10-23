@@ -17,18 +17,9 @@ Why this is safe to do without touching the original files:
   run() function -- so patching the class attribute right before calling
   run() is enough; run() picks up the patched values when it constructs its
   own instance.
-- AutoEncoderConfig is different: its module-level `config` object is built
-  at import time (training/autoencoder_training.py instantiates it and reads
-  embeddings from config.FINETUNED_MODEL_PATH as import-time side effects),
-  and its __init__ hardcodes `self.SEED = 42`. A pre-import class-level SEED
-  patch would be silently overwritten by that hardcoded line. Instead this
-  wrapper patches the class-level MODEL_DIR / FINETUNED_MODEL_PATH (both are
-  plain class attributes, never reassigned in __init__, so a pre-import patch
-  sticks) so embeddings are extracted from *this trial's* ModernBERT
-  checkpoint and the trained autoencoder is saved to *this trial's* directory
-  -- then re-seeds the global torch/numpy RNG state right before calling
-  run(), which is when the actual randomness (model weight init, DataLoader
-  shuffle order) happens.
+- Autoencoder training is now import-safe. Its run() accepts the trial's
+  encoder directory, output directory and seed explicitly. Prepared train/val
+  artifacts are read verbatim; all eligibility filtering happened upstream.
 """
 from __future__ import annotations
 
@@ -65,20 +56,9 @@ def _run_autoencoder(seed: int, output_dir: Path, modernbert_dir: Path) -> None:
     AutoEncoderConfig.FINETUNED_MODEL_PATH = modernbert_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Importing this module runs its Stage-2 data loading and embedding
-    # extraction as import-time side effects, using the patched
-    # FINETUNED_MODEL_PATH above.
+    # Import-safe training: use the trial's checkpoint and seed explicitly.
     import training.autoencoder_training as ae_mod
-    import torch
-    import numpy as np
-
-    # The module seeded the RNG with the hardcoded default (42) as an
-    # import-time side effect; re-seed now, right before the actual
-    # randomness (model init, DataLoader shuffling) happens inside run().
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    ae_mod.run()
+    ae_mod.run(encoder_dir=modernbert_dir, output_dir=output_dir, seed=seed)
 
 
 def main() -> None:

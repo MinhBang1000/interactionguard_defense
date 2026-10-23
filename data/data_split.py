@@ -92,6 +92,8 @@ def validate_splits(splits: dict, all_ids: set[str]) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    parser.add_argument("--source-dir", type=Path, help="Read enriched episode files here, with original raw hash verification")
+    parser.add_argument("--require-outcomes", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--membership-from", type=Path)
     parser.add_argument("--fresh-split", action="store_true")
@@ -103,15 +105,32 @@ def main(argv=None):
     for ratios in (args.benign_ratios, args.attack_ratios):
         if any(r < 0 or r > 1 for r in ratios) or abs(sum(ratios) - 1) > 1e-9:
             parser.error("Split ratios must be in [0, 1] and sum to one")
-    by_type, hashes = {}, {}
+    by_type, hashes, source_hashes = {}, {}, {}
+    source_dir = args.source_dir or args.data_dir/"raw"
+    source_manifest = None
+    if args.require_outcomes:
+        source_manifest = json.loads((source_dir/"manifest.json").read_text())
     for file_name, attack_type in SOURCES.items():
-        path = args.data_dir / "raw" / file_name
+        path = source_dir / file_name
         rows = read_jsonl(path)
-        hashes[file_name] = sha256(path)
+        raw_path = args.data_dir/"raw"/file_name
+        hashes[file_name] = sha256(raw_path)
+        source_hashes[file_name] = sha256(path)
+        if source_manifest:
+            if source_manifest["raw_sha256"][file_name] != hashes[file_name] or source_manifest["annotated_sha256"][file_name] != source_hashes[file_name]:
+                raise ValueError("Raw or annotated source changed; rerun raw annotation")
+            originals = read_jsonl(raw_path)
+            if len(rows) != len(originals) or any({k:v for k,v in row.items() if k != "asr_outcome"} != original for row, original in zip(rows, originals)):
+                raise ValueError("Annotated source changed original trace fields/order")
         for row in rows:
             if not isinstance(row.get("id"), str) or not row["id"]:
                 raise ValueError(f"Missing episode ID in {path}")
             row["label"], row["attack_type"] = int(attack_type is not None), attack_type
+            if args.require_outcomes:
+                from eval.asr import original_outcome
+                if "asr_outcome" not in row:
+                    raise ValueError("Missing source outcome")
+                original_outcome(normalize_trace(row))
         by_type[attack_type] = rows
     all_rows = [r for rows in by_type.values() for r in rows]
     indexed = {r["id"]: r for r in all_rows}
@@ -133,7 +152,9 @@ def main(argv=None):
                 "membership_policy": "preserved" if membership else "seeded_legacy_grouping",
                 "membership_archive": (str(args.membership_from) if args.membership_from
                                        else previous.get("membership_archive") if membership else None),
-                "raw_sha256": hashes, "integrity": integrity, "splits": {}, "episode_ids": {},
+                "raw_sha256": hashes, "source_dir": str(source_dir), "source_sha256": source_hashes,
+                "asr_outcomes_required": args.require_outcomes,
+                "integrity": integrity, "splits": {}, "episode_ids": {},
                 "label_note": "Split label/original_label denotes scenario, not observed injection or success. Processed label denotes visible known payload."}
     for split in SPLITS:
         normalized = [normalize_trace(r) for r in splits[split]]

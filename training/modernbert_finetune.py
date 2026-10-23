@@ -1,247 +1,162 @@
-# ============================================================================
-# FILE: training/modernbert_finetune.py
-# Fine-tune the ModernBERT encoder used as the Layer 1 backbone.
-#
-# Purpose:
-# - Trains the encoder that later supplies embeddings to the Layer 1
-#   autoencoder-based anomaly detector.
-#
-# Workflow:
-# - Loads processed training and validation data.
-# - Fine-tunes ModernBERT with early stopping and evaluation checkpoints.
-# - Saves the resulting encoder artifacts and training metadata.
-#
-# Use this file when:
-# - You want to rebuild the encoder stage before retraining Layer 1.
-# ============================================================================
-# ============================================================================
-# Minimal ModernBERT Fine-tuning
-# Keeps:
-# - EarlyStopping
-# - Validation evaluation
-# - Train subset control
-# ============================================================================
+"""Train a reproducible encoder on prepared data, without reading the test set."""
+from __future__ import annotations
 
-import json
-import os
 import argparse
-import torch
-import numpy as np
-from utils.utils import load_jsonl, make_dataset
-from config.config import ModernBERTConfig
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    TrainingArguments,
-    Trainer,
-    EarlyStoppingCallback
-)
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import os
+from pathlib import Path
+import time
 
-# ==============================
-# METRICS
-# ==============================
 
-def compute_metrics(pred):
+def configure_loss_normalization(model):
+    # ModernBERT's mean CE does not consume num_items_in_batch (Transformers 5).
+    model.accepts_loss_kwargs = False
+    return model
 
-    logits, labels = pred
-    preds = np.argmax(logits, axis=-1)
 
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        labels,
-        preds,
-        average="binary"
-    )
-
-    acc = accuracy_score(labels, preds)
-
-    return {
-        "accuracy":acc,
-        "precision":precision,
-        "recall":recall,
-        "f1":f1
-    }
-
-def run(train_percent: int | None = None):
-    # ==============================
-    # TRAINING ARGUMENTS
-    # ==============================
-    config = ModernBERTConfig()
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(config.CUDA_VISIBLE_DEVICES)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    train_ratio = config.TRAIN_RATIO if train_percent is None else (train_percent / 100.0)
-    if not 0 < train_ratio <= 1:
-        raise ValueError("train_percent must be between 1 and 100")
-
+def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
+    import numpy as np
+    import torch
+    from datasets import Dataset
+    from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
+                              DataCollatorWithPadding, EarlyStoppingCallback, Trainer,
+                              TrainingArguments, set_seed)
+    from config.config import ModernBERTConfig
+    from data.data_preprocess import ROOT, sha256, write_json
     from data.prepare_training import load_prepared
-    train_data = load_prepared("encoder", "train", output_dir=config.DATA_DIR.parent,
-                               expected_path=config.DATA_DIR / config.TRAIN_FILE)
-    val_data = load_prepared("encoder", "val", output_dir=config.DATA_DIR.parent,
-                             expected_path=config.DATA_DIR / config.VAL_FILE)
-    if not train_data:
-        raise ValueError(f"Empty training file: {config.DATA_DIR / config.TRAIN_FILE}")
-    if not val_data:
-        raise ValueError(f"Empty validation file: {config.DATA_DIR / config.VAL_FILE}")
+    from training.layer1_common import provenance, timestamp
 
-    np.random.seed(config.SEED)
-    np.random.shuffle(train_data)
-    subset_size = max(1, int(len(train_data) * train_ratio))
-    train_data = train_data[:subset_size]
+    config = ModernBERTConfig()
+    run_seed = config.SEED if seed is None else seed
+    set_seed(run_seed)
+    if not torch.cuda.is_available():
+        raise RuntimeError("A CUDA GPU is required for this long-context encoder run")
+    if not torch.cuda.is_bf16_supported():
+        raise RuntimeError("This configuration requires BF16 support")
+    ratio = config.TRAIN_RATIO if train_percent is None else train_percent / 100
+    if not 0 < ratio <= 1:
+        raise ValueError("train_percent must be between 1 and 100")
+    output = Path(output_dir or config.OUTPUT_DIR)
+    if (output / "training_config.json").exists():
+        raise ValueError(f"Refusing to overwrite a trained encoder: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+    train = load_prepared("encoder", "train", output_dir=config.DATA_DIR.parent)
+    val = load_prepared("encoder", "val", output_dir=config.DATA_DIR.parent)
+    order = np.random.default_rng(run_seed).permutation(len(train))
+    train = [train[i] for i in order[:max(1, int(len(train)*ratio))]]
+    tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME, local_files_only=True)
+    tokenizer.padding_side, tokenizer.truncation_side = "right", "right"
+    settings = {"model_name": config.MODEL_NAME, "max_length": config.MAX_LENGTH,
+                "trust_remote_code": False, "pooling": "cls", "classifier_pooling": "cls",
+                "padding": "dynamic", "truncation_side": "right", "precision": "bf16",
+                "group_by_length": True,
+                "embedding_precision": "bf16", "embedding_batch_size": 1,
+                "attention_implementation": "sdpa", "gradient_checkpointing": True,
+                "gradient_accumulation_loss_normalized_by_trainer": True,
+                "epochs": config.EPOCHS, "learning_rate": config.LR,
+                "batch_size": config.BATCH_SIZE, "gradient_accumulation": config.GRAD_ACCUM,
+                "effective_batch_size": config.BATCH_SIZE*config.GRAD_ACCUM,
+                "weight_decay": config.WEIGHT_DECAY, "warmup_ratio": config.WARMUP_RATIO,
+                "max_grad_norm": config.MAX_GRAD_NORM, "seed": run_seed,
+                "train_ratio": ratio, "train_samples": len(train), "val_samples": len(val),
+                "eval_strategy": "epoch", "checkpoint_selection": "validation_f1",
+                "early_stopping_patience": config.EARLY_STOP_PATIENCE,
+                "save_total_limit": 2, "dataloader_num_workers": 0,
+                "prepared_manifest_sha256": sha256(ROOT / "data/training/manifest.json"),
+                "source_sha256": sha256(Path(__file__)), "provenance": provenance(),
+                "started_at_utc": timestamp(), "smoke_test": smoke}
+    write_json(output / "run_config.json", settings)
+    write_json(output / "sample_ids.json", {"train": [r["id"] for r in train], "val": [r["id"] for r in val]})
 
-    print(f"Training ratio used : {train_ratio:.2%}")
-    print(f"Training samples    : {subset_size}")
-    print(f"Validation samples  : {len(val_data)}")
-    print(f"CUDA devices        : {config.CUDA_VISIBLE_DEVICES}")
+    def dataset(rows):
+        data = Dataset.from_dict({"text": [r["sequence"] for r in rows], "labels": [r["label"] for r in rows]})
+        return data.map(lambda examples: tokenizer(examples["text"], truncation=True,
+                                                    max_length=config.MAX_LENGTH),
+                        batched=True, remove_columns=["text"])
 
-    train_dataset = make_dataset(train_data)
-    val_dataset = make_dataset(val_data)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.MODEL_NAME,
-        trust_remote_code=True
-    )
-
-    def tokenize(example):
-        return tokenizer(
-            example["text"],
-            truncation=True,
-            padding="max_length",
-            max_length=config.MAX_LENGTH
-        )
-
-    train_dataset = train_dataset.map(tokenize)
-    val_dataset = val_dataset.map(tokenize)
-
-    train_dataset.set_format("torch", columns=["input_ids", "attention_mask", "label"])
-    val_dataset.set_format("torch", columns=["input_ids", "attention_mask", "label"])
-
+    train_ds, val_ds = dataset(train), dataset(val)
     model = AutoModelForSequenceClassification.from_pretrained(
-        config.MODEL_NAME,
-        num_labels=2,
-        trust_remote_code=True
-    ).to(device)
+        config.MODEL_NAME, num_labels=2, local_files_only=True,
+        classifier_pooling="cls", reference_compile=False, attn_implementation="sdpa")
+    # ModernBERT computes mean CE but ignores num_items_in_batch in Transformers 5.
+    # Tell Trainer to divide by accumulation steps rather than counting loss twice.
+    configure_loss_normalization(model)
+    collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
+    if smoke:
+        model.to("cuda:0").train()
+        model.gradient_checkpointing_enable()
+        index = max(range(len(train_ds)), key=lambda i: len(train_ds[i]["input_ids"]))
+        batch = {k: v.to("cuda:0") for k, v in collator([train_ds[index]]*config.BATCH_SIZE).items()}
+        start = time.perf_counter()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            loss = model(**batch).loss
+        loss.backward()
+        if not torch.isfinite(loss):
+            raise ValueError("Nonfinite smoke-test loss")
+        torch.cuda.synchronize()
+        report = {"loss": float(loss.detach()), "micro_batch_size": config.BATCH_SIZE,
+                  "sequence_length": batch["input_ids"].shape[1],
+                  "seconds": time.perf_counter()-start, "max_allocated_gib": torch.cuda.max_memory_allocated()/2**30,
+                  "status": "forward_backward_passed"}
+        write_json(output / "smoke_test.json", report)
+        print(report, flush=True)
+        return report
 
-    training_args = TrainingArguments(
+    def compute_metrics(prediction):
+        from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+        preds = np.argmax(prediction.predictions, axis=-1)
+        precision, recall, f1, _ = precision_recall_fscore_support(prediction.label_ids, preds, average="binary", zero_division=0)
+        return {"accuracy": accuracy_score(prediction.label_ids, preds), "precision": precision, "recall": recall, "f1": f1}
 
-        # Output
-        output_dir=str(config.OUTPUT_DIR),
-
-        # Training
-        num_train_epochs=config.EPOCHS,
-        per_device_train_batch_size=config.BATCH_SIZE,
-        per_device_eval_batch_size=16,
-        learning_rate=config.LR,
-
-        # Optimization (RESTORED)
-        weight_decay=config.WEIGHT_DECAY,
-        warmup_ratio=config.WARMUP_RATIO,
-        max_grad_norm=config.MAX_GRAD_NORM,
-        gradient_accumulation_steps=config.GRAD_ACCUM,
-
-        # Mixed precision
-        fp16=torch.cuda.is_available(),
-
-        # Evaluation (RESTORED)
-        eval_strategy="steps",
-        eval_steps=config.EVAL_STEPS,
-
-        save_strategy="steps",
-        save_steps=config.EVAL_STEPS,
-        save_total_limit=config.SAVE_TOTAL_LIMIT,
-
-        load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        greater_is_better=True,
-
-        # Logging (RESTORED)
-        logging_dir=str(config.OUTPUT_DIR / "logs"),
-        logging_steps=config.LOGGING_STEPS,
-        report_to="none",
-
-        # Reproducibility (RESTORED)
-        seed=config.SEED,
-        data_seed=config.SEED,
-
-        # DataLoader stability (RESTORED)
-        dataloader_num_workers=4,
-        dataloader_pin_memory=True,
-        dataloader_drop_last=False
-    )
-
-    # ==============================
-    # TRAINER
-    # ==============================
-
-    trainer = Trainer(
-
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-
-        compute_metrics=compute_metrics,
-
-        callbacks=[
-            EarlyStoppingCallback(
-                early_stopping_patience=config.EARLY_STOP_PATIENCE
-            )
-        ]
-    )
-    # ==============================
-    # TRAIN
-    # ==============================
-
+    args = TrainingArguments(
+        output_dir=str(output / "checkpoints"), num_train_epochs=config.EPOCHS,
+        per_device_train_batch_size=config.BATCH_SIZE, per_device_eval_batch_size=1,
+        gradient_accumulation_steps=config.GRAD_ACCUM, learning_rate=config.LR,
+        weight_decay=config.WEIGHT_DECAY, warmup_ratio=config.WARMUP_RATIO,
+        max_grad_norm=config.MAX_GRAD_NORM, bf16=True, fp16=False,
+        gradient_checkpointing=True, eval_strategy="epoch", save_strategy="epoch",
+        save_total_limit=2, load_best_model_at_end=True, metric_for_best_model="f1",
+        greater_is_better=True, logging_steps=25, report_to="none",
+        seed=run_seed, data_seed=run_seed, dataloader_num_workers=0, group_by_length=True,
+        dataloader_pin_memory=True, disable_tqdm=True)
+    trainer = Trainer(model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds,
+                      processing_class=tokenizer, data_collator=collator, compute_metrics=compute_metrics,
+                      callbacks=[EarlyStoppingCallback(early_stopping_patience=config.EARLY_STOP_PATIENCE)])
     trainer.train()
+    validation = trainer.evaluate()
+    trainer.save_model(output)
+    tokenizer.save_pretrained(output)
+    settings.update({"finished_at_utc": timestamp(), "validation": validation,
+                     "best_checkpoint": trainer.state.best_model_checkpoint,
+                     "best_validation_f1": trainer.state.best_metric,
+                     "base_model_revision": getattr(model.config, "_commit_hash", None),
+                     "model_config": model.config.to_dict(),
+                     "tokenizer_sha256": sha256(output / "tokenizer.json"),
+                     "training_arguments": args.to_dict()})
+    write_json(output / "training_config.json", settings)
+    write_json(output / "training_history.json", {"log_history": trainer.state.log_history})
+    print(f"ENCODER COMPLETE {output}; validation={validation}", flush=True)
+    return settings
 
-    # ==============================
-    # VALIDATION EVALUATION
-    # ==============================
 
-    results = trainer.evaluate(eval_dataset=val_dataset)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--train_percent", type=int, default=100)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--device", default=os.environ.get("CUDA_DEVICE_TRAIN", os.environ.get("CUDA_DEVICE_ML", "0")))
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--smoke", action="store_true")
+    args = parser.parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+    os.environ["CUDA_DEVICE_ML"] = args.device
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    from training.layer1_pipeline import gpu_preflight
+    gpu_preflight(args.device)
+    if args.output_dir is None:
+        from datetime import datetime, timezone
+        from data.data_preprocess import ROOT
+        args.output_dir = ROOT / "models/layer1/training_runs" / datetime.now(timezone.utc).strftime("encoder_%Y%m%d_%H%M%S")
+    run(args.train_percent, output_dir=args.output_dir, smoke=args.smoke, seed=args.seed)
 
-    print("\nValidation Results")
-
-    for k,v in results.items():
-        if "eval" in k:
-            print(f"{k}: {v:.4f}")
-
-    # ==============================
-    # SAVE MODEL
-    # ==============================
-
-    trainer.save_model(config.OUTPUT_DIR)
-    tokenizer.save_pretrained(config.OUTPUT_DIR)
-
-    # ==============================
-    # ADDED: SAVE TRAINING CONFIG
-    # ==============================
-
-    training_config = {
-
-        "model_name": config.MODEL_NAME,
-        "max_length": config.MAX_LENGTH,
-        "trust_remote_code": True,
-
-        "epochs": config.EPOCHS,
-        "learning_rate": config.LR,
-        "batch_size": config.BATCH_SIZE,
-        "gradient_accumulation": config.GRAD_ACCUM,
-        "train_ratio": train_ratio,
-        "train_samples": subset_size,
-        "val_samples": len(val_data),
-    }
-
-    with open(config.OUTPUT_DIR / "training_config.json","w") as f:
-        json.dump(training_config,f,indent=2)
-
-    print("\nTraining config saved:", config.OUTPUT_DIR / "training_config.json")
-
-    print("\nModel saved:", config.OUTPUT_DIR)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune Layer 1 ModernBERT encoder.")
-    parser.add_argument("--train_percent", type=int, default=None)
-    args = parser.parse_args()
-    run(train_percent=args.train_percent)
+    main()

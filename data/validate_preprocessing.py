@@ -40,10 +40,26 @@ def main(argv=None):
               "integrity": manifest["integrity"], "splits": {}, "review": [],
               "limitations": [
                   "Known-payload labels are operational annotations, not an independent semantic judge.",
-                  "Attack-success metadata uses a tool-result proxy; prompt attacks still require a success judge.",
+                  "Prefix attack-success metadata is the legacy proxy; authoritative split asr_outcome uses the versioned ASR contract when present.",
+                  "Missing prompt-success judges remain UNKNOWN; full preparation does not call an LLM judge.",
                   "Shared prompts and identical pre-injection prefixes are intentional; no wholly unseen-content claim.",
                   "Correlated scenarios without both linked fragments are not complete-chain evidence.",
               ]}
+    if manifest.get("asr_outcomes_required"):
+        from eval.asr import CONTRACT, original_outcome
+        source_dir = Path(manifest["source_dir"])
+        source_meta = json.loads((source_dir/"manifest.json").read_text())
+        require(source_meta["contract"] == CONTRACT, "Annotated ASR contract is stale")
+        for name in SOURCES:
+            require(sha256(source_dir/name) == source_meta["annotated_sha256"][name], "Annotated source changed")
+            require(source_meta["raw_sha256"][name] == manifest["raw_sha256"][name], "Annotated raw provenance changed")
+        report["episode_outcomes"] = {}
+        for split in SPLITS:
+            traces = read_jsonl(args.data_dir/f"splits/{split}.jsonl")
+            for trace in traces:
+                require("asr_outcome" in trace, "Split is missing canonical outcome metadata")
+                original_outcome(trace)
+            report["episode_outcomes"][split] = dict(Counter(t["asr_outcome"]["verdict"] for t in traces))
     with zipfile.ZipFile(archive) as handle:
         require(handle.testzip() is None, "Backup ZIP failed CRC verification")
         for name in SOURCES:

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from transformers import AutoTokenizer, AutoModel
 import json
+from contextlib import nullcontext
 from tqdm.auto import tqdm
 
 class AutoEncoder(nn.Module):
@@ -80,6 +81,7 @@ class Layer1Detector:
 
         self.max_length = self.bert_config["max_length"]
         self.trust_remote_code = self.bert_config.get("trust_remote_code", False)
+        self.embedding_precision = self.bert_config.get("embedding_precision", "float32")
 
         self._load_models()
 
@@ -94,9 +96,12 @@ class Layer1Detector:
             self.bert_model_path,
             trust_remote_code = self.trust_remote_code
         )
+        model_options = ({"attn_implementation": self.bert_config["attention_implementation"],
+                          "reference_compile": False} if "attention_implementation" in self.bert_config else {})
         self.embedding_model = AutoModel.from_pretrained(
             self.bert_model_path,
-            trust_remote_code = self.trust_remote_code
+            trust_remote_code = self.trust_remote_code,
+            **model_options,
         )
         self.embedding_model = self.embedding_model.to(self.device)
         # frozen the weights to evaluate
@@ -107,6 +112,10 @@ class Layer1Detector:
 
         # Load AE
         ae_checkpoint = torch.load(self.ae_model_path, map_location = self.device)
+        from training.layer1_common import directory_hash
+        self.encoder_fingerprint = directory_hash(self.bert_model_path)
+        if ae_checkpoint.get("encoder_sha256") and ae_checkpoint["encoder_sha256"] != self.encoder_fingerprint:
+            raise ValueError("AE checkpoint and encoder fingerprint do not match")
         ae_config = ae_checkpoint["config"]
 
         self.autoencoder = AutoEncoder(
@@ -166,20 +175,24 @@ class Layer1Detector:
         # đụng chung 1 file cache, khiến embedding của model A bị dùng nhầm
         # cho model B -- đây là nguyên nhân gây sai lệch âm thầm và crash
         # shape-mismatch khi chạy Std Testing với nhiều checkpoint song song.)
-        hash_input = str(self.bert_model_path) + "".join(sequences[:50])  # sample để nhanh hơn
-        dataset_hash = hashlib.md5(hash_input.encode()).hexdigest()
+        hash_input = json.dumps({"encoder": self.encoder_fingerprint, "max_length": self.max_length,
+                                 "precision": self.embedding_precision, "sequences": sequences}, ensure_ascii=False)
+        dataset_hash = hashlib.sha256(hash_input.encode()).hexdigest()
 
         cache_path = cache_dir / f"emb_{dataset_hash}.npy"
         self.last_embedding_cache_loaded = False
+        batch_size = min(batch_size, int(self.bert_config.get("embedding_batch_size", batch_size)))
         self.last_embedding_batch_size = int(batch_size)
 
         # -------------------------
         # LOAD nếu có
         # -------------------------
         if cache_path.exists():
-            self.last_embedding_cache_loaded = True
-            print(f"⚡ Loading cached embeddings: {cache_path}")
-            return np.load(cache_path)
+            cached = np.load(cache_path)
+            if cached.shape == (len(sequences), self.autoencoder.encoder[0].in_features):
+                self.last_embedding_cache_loaded = True
+                print(f"⚡ Loading cached embeddings: {cache_path}")
+                return cached
 
         # -------------------------
         # COMPUTE nếu chưa có
@@ -195,14 +208,17 @@ class Layer1Detector:
                     batch,
                     max_length=self.max_length,
                     truncation=True,
-                    padding="max_length",
+                    padding=True if self.bert_config.get("padding") == "dynamic" else "max_length",
                     return_tensors="pt"
                 )
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                outputs = self.embedding_model(**inputs)
+                context = (torch.autocast("cuda", dtype=torch.bfloat16)
+                           if self.device.type == "cuda" and self.embedding_precision == "bf16" else nullcontext())
+                with context:
+                    outputs = self.embedding_model(**inputs)
 
                 cls_embeddings = outputs.last_hidden_state[:, 0, :]
-                embeddings.append(cls_embeddings.cpu().numpy())
+                embeddings.append(cls_embeddings.float().cpu().numpy())
 
         embeddings = np.vstack(embeddings)
 

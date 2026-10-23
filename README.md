@@ -360,9 +360,40 @@ Archives the current `results/` directory into a timestamped zip under
 
 ### `10` Data preparation
 
-- Regenerate splits from `data/raw`
-- Regenerate processed files from `data/splits`
-- Full regenerate: raw -> splits -> processed
+- `10 -> 1`: raw -> `data/annotated/`, adding `asr_outcome` to every episode.
+  Llama judges uncached prompt-injection outcomes before annotation.
+- `10 -> 2`: annotated episodes -> train/validation/test splits only.
+- `10 -> 3`: FULL: verified backup -> raw ASR + Llama judge -> annotated episodes
+  -> splits -> normalized prefixes -> fixed encoder/AE training data -> tests/validation.
+- `10 -> 4`: split traces -> prefix-level samples only.
+- `10 -> 5`: processed prefixes -> fixed encoder/AutoEncoder training data only.
+- `10 -> 6`: tests and data validation only.
+
+Active ASR metadata is the `asr_outcome` object in annotated episodes and splits,
+never in model input. Existing split membership is preserved when available;
+otherwise the original split percentages/grouping rules apply.
+Target calls without prior matching attack instructions, including calls before
+the payload appears, are `FAILURE`; a later instruction-supported call is `SUCCESS`.
+Historical V2/V3 annotations remain in backups/results, not silently mixed with
+the canonical field. Raw files are unchanged: annotated files preserve all raw
+fields and add only `asr_outcome`; splits consume these annotated files, not the raw
+files. Manifests verify both raw and annotated hashes. Outcome objects include
+explanation, evidence, timing, contract and trace hashes.
+
+The default judge is pinned HF Llama3.1-8B-Instruct BF16 via the isolated vLLM
+environment on physical GPU0 (idle RTX4090 required); it does not alter Ollama or
+GPU1. Full traces are passed without silent truncation, with a16384-token budget.
+Context overflow, invalid evidence or incomplete output remains `UNKNOWN` for
+review, never a fabricated failure. The accepted80 legacy test judgments are
+preserved; other judgments are cached in `eval/prompt_success_judgements.jsonl`.
+Explicit assistant trace reviews are stored in `eval/prompt_success_reviews.jsonl`;
+reviewed records retain the original Llama proposal. A reviewed outcome is not
+presented as an independently verified automatic Llama decision.
+
+No encoder/AE training or defense inference runs here. Prefix labels and the
+correlated-exclusion/benign-only AE policies are unchanged. Stage reports/backups
+are under `results/raw_asr_preparation/` and `backups/`. Only test ASR is exported
+by the full workflow; training/validation outcomes do not select defense thresholds.
 
 Each option asks for a `YES` confirmation before overwriting, since it
 regenerates files other steps depend on.
@@ -475,9 +506,19 @@ python main.py
 Data processing (equivalent to menu `10 -> 3`):
 
 ```bash
-python -m data.data_split
-python -m data.data_preprocess
+python -m data.workflow --scope all
 ```
+
+Individual stages: `python -m data.workflow --scope asr|split|preprocess|training|validate`
+(choose one value). ASR-only includes missing prompt judging.
+
+Use `--skip-judge` to explicitly retain missing outcomes as `UNKNOWN`, or choose
+`--judge-backend openai-compatible --judge-base-url http://127.0.0.1:11434/v1`
+for an already running local compatible Llama server. For default GPU0 vLLM,
+the separate interpreter must exist at
+`experiments/side_tests/vllm_layer3/.venv/bin/python`; do not install conflicting
+vLLM/Torch packages into the training environment. No automatic package installation
+or model download is performed. See that folder's README for environment setup.
 
 ## Repository History / Migration Note
 

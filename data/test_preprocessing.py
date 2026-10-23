@@ -108,13 +108,13 @@ class PreprocessingTests(unittest.TestCase):
         raw["trace"] = ["retrieve"]
         row = list(expand_trace(raw))[-1]
         self.assertEqual(row["label"], 1)
-        self.assertFalse(row["episode_attack_success"])
+        self.assertNotIn("episode_attack_success", row)
 
     def test_prompt_success_is_not_invented(self):
         raw = episode("prompt")
         row = list(expand_trace(raw))[0]
         self.assertEqual(row["label"], 1)
-        self.assertIsNone(row["episode_attack_success"])
+        self.assertNotIn("episode_attack_success", row)
 
     def test_future_metadata_not_serialized_as_input(self):
         row = list(expand_trace(episode()))[0]
@@ -125,6 +125,8 @@ class PreprocessingTests(unittest.TestCase):
 
     def test_linked_fragments_audit(self):
         audit = audit_trace(normalize_trace(episode()))
+        self.assertNotIn("episode_attack_success", audit)
+        self.assertNotIn("attack_success_rule", audit)
         self.assertTrue(audit["linked_fragments_observed"])
         self.assertTrue(audit["linked_fragments_within_safe_prefix"])
 

@@ -1887,42 +1887,9 @@ def run_layer3_backend_latency_sweep():
 
 
 def find_threshold_layer1():
-    """
-    Automatically search Layer1 anomaly threshold that achieves FN = 0
-    while minimizing FP.
-    """
-
-    print("\n=== FINDING OPTIMAL THRESHOLD FOR LAYER 1 ===\n")
-
-    test_path = PROCESSED_DIR / "test_processed.jsonl"
-    config_path = CONFIG_DIR / "detection_config.yaml"
-
-    test_data = load_jsonl(test_path)
-
-    if not test_data:
-        raise ValueError("Empty test-data JSONL")
-
-    sequences = [d["sequence"] for d in test_data]
-    labels = np.array([d["label"] for d in test_data])
-
-    from models.detectors.pipeline import DetectionPipeline
-
-    pipeline = DetectionPipeline(config_path=config_path, test_mode=1)
-
-    result = pipeline.find_threshold_no_fn(
-        sequences=sequences,
-        labels=labels
-    )
-
-    print("\nOptimal Threshold Found:")
-    print("--------------------------------")
-    print(f"Threshold : {result['threshold']}")
-    print(f"FP Count  : {result['fp']}")
-    print("--------------------------------\n")
-
-    save_results(result, RESULT_DIR / "layer1_threshold_search.json")
-
-    print("Threshold search results saved.\n")
+    """Calibrate only on prepared validation data; keep test for final reporting."""
+    device = input("Physical idle GPU for calibration [0]: ").strip() or "0"
+    subprocess.run([sys.executable, "-m", "training.calibrate_layer1", "--device", device], check=True)
 
 def run_without_defense_prompt_injection_eval():
     prompt_injection_eval()
@@ -1945,8 +1912,10 @@ def run_fine_tune_modermBERT():
     print("Choose how much of prepared data/training/encoder/train.jsonl to use.\n")
     print(f"CUDA devices from config: {ModernBERTConfig.CUDA_VISIBLE_DEVICES}\n")
     percent = ask_percentage()
+    device = input("Physical idle GPU for training [0]: ").strip() or "0"
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(ModernBERTConfig.CUDA_VISIBLE_DEVICES)
+    env["CUDA_VISIBLE_DEVICES"] = device
+    env["CUDA_DEVICE_ML"] = device
     subprocess.run(
         [
             sys.executable,
@@ -1954,6 +1923,7 @@ def run_fine_tune_modermBERT():
             "training.modernbert_finetune",
             "--train_percent",
             str(percent),
+            "--device", device,
         ],
         check=True,
         env=env,
@@ -1963,13 +1933,19 @@ def run_training_autoencoder():
     from config.config import AutoEncoderConfig
     print_header("LAYER 1 AUTOENCODER TRAINING")
     print(f"CUDA devices from config: {AutoEncoderConfig.CUDA_VISIBLE_DEVICES}\n")
+    encoder_path = input(f"Trained encoder path [{AutoEncoderConfig.FINETUNED_MODEL_PATH}]: ").strip()
+    device = input("Physical idle GPU for training [0]: ").strip() or "0"
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(AutoEncoderConfig.CUDA_VISIBLE_DEVICES)
+    env["CUDA_VISIBLE_DEVICES"] = device
+    env["CUDA_DEVICE_ML"] = device
     subprocess.run(
         [
             sys.executable,
             "-m",
             "training.autoencoder_training",
+            "--encoder",
+            encoder_path or str(AutoEncoderConfig.FINETUNED_MODEL_PATH),
+            "--device", device,
         ],
         check=True,
         env=env,
@@ -2247,13 +2223,16 @@ def confirm_data_regeneration(scope):
     print("A verified ZIP snapshot of current data/ and eval/ will be created first.")
     if scope in {"split", "all"}:
         print("Affected: data/splits/train.jsonl, val.jsonl, test.jsonl")
+    if scope in {"asr", "all"}:
+        print("ASR: raw -> data/annotated with asr_outcome; Llama judges uncached prompt episodes on GPU0.")
+        print("Accepted legacy test verdicts are retained; A/B=FAILURE, C=SUCCESS.")
     if scope in {"preprocess", "all"}:
         print("Affected: data/processed/train_processed.jsonl, val_processed.jsonl, test_processed.jsonl")
-    if scope in {"preprocess", "training", "all"}:
+    if scope in {"training", "all"}:
         print("Affected: fixed encoder/AutoEncoder train and validation files under data/training/")
     print("Raw files under data/raw/ will not be changed by this menu action.")
-    if scope in {"preprocess", "all"}:
-        print("Then: local tests, validation and no-defense ASR; no training or LLM calls.")
+    if scope in {"validate", "all"}:
+        print("Then: local tests/validation; full run also exports test ASR. No encoder/AE training.")
 
     answer = input("Type YES to continue: ").strip()
     if answer != "YES":
@@ -2274,7 +2253,7 @@ def run_data_split_step():
         return
     print_header("REGENERATE DATA SPLITS")
     subprocess.run([sys.executable, "-m", "data.workflow", "--scope", "split"], check=True)
-    print("\nData splits regenerated from data/raw/.")
+    print("\nData splits regenerated from data/annotated/ with episode ASR outcomes.")
 
 
 def run_data_preprocess_step():
@@ -2290,7 +2269,13 @@ def run_full_data_regeneration():
         return
     print_header("FULL DATA REGENERATION")
     run_python_module("data.workflow")
-    print("\nData splits and processed files regenerated from current data/raw/.")
+    print("\nComplete: raw -> annotated episodes + prompt judge -> splits -> prefixes -> fixed encoder/AE data.")
+
+
+def run_trace_asr_annotation():
+    if not confirm_data_regeneration("asr"):
+        return
+    subprocess.run([sys.executable, "-m", "data.workflow", "--scope", "asr"], check=True)
 
 
 def run_training_data_preparation():
@@ -2304,10 +2289,12 @@ def run_data_preparation_menu():
         choice = ask_choice(
             "DATA PREPARATION",
             [
-                ("1", "Regenerate splits from data/raw"),
-                ("2", "Regenerate processed files from data/splits"),
-                ("3", "Full regenerate: raw -> splits -> processed"),
-                ("4", "Prepare fixed encoder/AutoEncoder training data from processed"),
+                ("1", "Raw -> asr_outcome annotated traces (Llama judges missing prompt outcomes)"),
+                ("2", "Annotated traces -> train/val/test splits only"),
+                ("3", "FULL: raw -> ASR + Llama judge -> splits -> prefixes -> training data"),
+                ("4", "Split traces -> prefix-level samples only"),
+                ("5", "Processed prefixes -> fixed encoder/AutoEncoder training data only"),
+                ("6", "Run data tests and validation only"),
                 ("0", "Back"),
             ],
         )
@@ -2316,13 +2303,18 @@ def run_data_preparation_menu():
             if choice == "0":
                 return
             if choice == "1":
-                run_data_split_step()
+                run_trace_asr_annotation()
             elif choice == "2":
-                run_data_preprocess_step()
+                run_data_split_step()
             elif choice == "3":
                 run_full_data_regeneration()
             elif choice == "4":
+                run_data_preprocess_step()
+            elif choice == "5":
                 run_training_data_preparation()
+            elif choice == "6":
+                if confirm_data_regeneration("validate"):
+                    subprocess.run([sys.executable, "-m", "data.workflow", "--scope", "validate"], check=True)
         except subprocess.CalledProcessError as exc:
             print(f"\nData preparation failed with exit code {exc.returncode}.")
 
@@ -2412,6 +2404,8 @@ def run_training_menu():
                 ("7", "Isolated Layer 1 retrain + high-benign Mode 11 sweep"),
                 ("8", "Extract FP samples from isolation Mode 11 result"),
                 ("9", "Re-evaluate trained isolation models with current Layer 3"),
+                ("10", "Full Layer 1: encoder -> AE search -> calibration -> sealed test"),
+                ("11", "Test frozen HF Layer 2 channel-wise + saved L1 threshold sweep (no training/L3)"),
                 ("0", "Back"),
             ],
         )
@@ -2436,6 +2430,16 @@ def run_training_menu():
             run_extract_isolation_fp_samples()
         elif choice == "9":
             run_reevaluate_isolation_models()
+        elif choice == "10":
+            device = input("Physical RTX 4090 GPU index [0]: ").strip() or "0"
+            command = [sys.executable, "-u", "-m", "training.layer1_pipeline", "--device", device]
+            if input("Activate validation-selected model/config after success? [y/N]: ").strip().lower() == "y":
+                command.append("--promote")
+            subprocess.run(command, check=True)
+
+        elif choice == "11":
+            device = input("Physical RTX 4090 GPU index [0]: ").strip() or "0"
+            subprocess.run([sys.executable, "-u", "-m", "experiments.layer2_channelwise_test", "--device", device], check=True)
 
 
 def run_sweeps_menu():
