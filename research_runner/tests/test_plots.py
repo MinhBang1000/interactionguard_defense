@@ -1,0 +1,30 @@
+import importlib.util
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from research_runner.plots import render
+
+
+class PlotTests(unittest.TestCase):
+    def test_empty_summary_requires_no_plotting_dependency(self):
+        self.assertEqual(render({}, '.' )['created'], [])
+
+    @unittest.skipUnless(importlib.util.find_spec('matplotlib'), 'Optional matplotlib is not installed')
+    def test_cpu_sweep_plot_is_created_in_temporary_directory(self):
+        summary = {}
+        for name, latency in [('benign_90', .4), ('benign_98', .15)]:
+            summary[name] = {'trials': 5, 'metrics': {
+                'f1': {'mean': .88, 'std': .01},
+                'estimated_pipeline_seconds_per_sample': {'mean': latency, 'std': .02}},
+                'traffic': {layer: {'mean': .05, 'std': .01} for layer in ('L1', 'L2', 'L3')}}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'MPLCONFIGDIR': temp}):
+            output = render(summary, temp)
+            self.assertEqual(output['created'], ['comparison.png'])
+            self.assertGreater((Path(temp) / 'comparison.png').stat().st_size, 1000)
+
+
+if __name__ == '__main__':
+    unittest.main()

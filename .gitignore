@@ -162,6 +162,7 @@ mlruns/
 mlartifacts/
 wandb/
 backups/
+backup/
 
 # ---------------------------------------------------------------------------
 # Visualization export directories

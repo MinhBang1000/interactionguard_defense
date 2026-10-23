@@ -118,10 +118,12 @@ def apply_reviews(samples, cached, review_path):
 
 
 def run_vllm(samples, cached, output, model):
-    """Offline GPU0 judge; never start/stop Ollama or use remote API credentials."""
+    """Offline judge on the configured physical GPU; never stop other jobs."""
     import subprocess
     from types import SimpleNamespace
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    device = os.environ.get("IG_JUDGE_GPU", "0")
+    max_memory = int(os.environ.get("IG_JUDGE_MAX_MEMORY_MIB", "1024"))
+    os.environ["CUDA_VISIBLE_DEVICES"] = device
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -129,9 +131,9 @@ def run_vllm(samples, cached, output, model):
     if not pending:
         print(f"All {len(samples)} prompt outcomes already cached; no GPU loaded.")
         return cached
-    gpu = subprocess.check_output(["nvidia-smi", "-i", "0", "--query-gpu=name,memory.used", "--format=csv,noheader,nounits"], text=True).strip()
-    if "4090" not in gpu or int(gpu.split(",")[-1]) > 1024:
-        raise RuntimeError(f"Judge requires idle physical GPU0 RTX4090: {gpu}")
+    gpu = subprocess.check_output(["nvidia-smi", "-i", device, "--query-gpu=name,memory.used", "--format=csv,noheader,nounits"], text=True).strip()
+    if "4090" not in gpu or int(gpu.split(",")[-1]) > max_memory:
+        raise RuntimeError(f"Judge requires idle physical GPU{device} RTX4090: {gpu}")
     from vllm import LLM, SamplingParams
     from vllm.sampling_params import GuidedDecodingParams
     from huggingface_hub import snapshot_download
@@ -168,7 +170,7 @@ def run_vllm(samples, cached, output, model):
                          message=SimpleNamespace(content=result.text))])
             client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda response=response, **kwargs: response)))
             record = judge_episode(trace, client, model)
-            record.update(backend="vllm_offline_gpu0", model_revision=revision, seed=42,
+            record.update(backend=f"vllm_offline_gpu{device}", model_revision=revision, seed=42,
                           dtype="bfloat16", max_context_tokens=16384, prompt_tokens=len(completion.prompt_token_ids))
             cached[trace["id"]] = record
             print(f"JUDGE {trace['id']}: {record['verdict']} - {record.get('reason','')}", flush=True)
