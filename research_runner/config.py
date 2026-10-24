@@ -26,6 +26,7 @@ class ConfigError(ValueError):
 
 DEFAULT_CONFIG = {
     "version": 1,
+    "primary_order": "Screen-Gate-Audit",
     "naming": {"version": 2, "legacy": {"L1": "Gate", "L2": "Screen", "L3": "Audit"},
                "paper": {"Screen": "L1", "Gate": "L2", "Audit": "L3"}},
     "paths": {"workspace": ".", "results": "results/research_runner", "backup": "backup"},
@@ -250,6 +251,7 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
         if section in supplied:
             _keys(supplied[section], set(DEFAULT_CONFIG[section]), section)
     config = _merge(DEFAULT_CONFIG, supplied)
+    _settings({'order': config['primary_order']}, 'primary_order')
     if config['naming'] != DEFAULT_CONFIG['naming']:
         raise ConfigError('naming must use version 2 with the fixed legacy and paper mappings')
     _keys(config["data"]["judge"], {"backend", "base_url", "skip", "api_key_env"}, "data.judge")
@@ -258,6 +260,30 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
     _keys(config["experiments"], _EXPERIMENTS, "experiments")
     for name, settings in config["experiments"].items():
         _settings(settings, f"experiments.{name}")
+        if name in {'baselines', 'threshold'}:
+            if 'order' in settings or 'orders' not in settings:
+                raise ConfigError(f'experiments.{name}.orders is required; use a list, not order')
+            if config['primary_order'] not in settings['orders']:
+                raise ConfigError(f'experiments.{name}.orders must include primary_order')
+        if name == 'backend':
+            if settings.get('order') != 'Screen-Gate-Audit' or 'orders' in settings:
+                raise ConfigError('experiments.backend.order must be Screen-Gate-Audit; sweep candidates, not orders')
+            if settings['order'] != config['primary_order']:
+                raise ConfigError('experiments.backend.order must match primary_order')
+            candidates = settings.get('candidates')
+            if not isinstance(candidates, list) or not candidates:
+                raise ConfigError('experiments.backend.candidates must be a nonempty list')
+            names = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    raise ConfigError('Each backend candidate must be a mapping')
+                _settings(candidate, 'backend candidate')
+                candidate_name = candidate.get('name')
+                if not isinstance(candidate_name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', candidate_name):
+                    raise ConfigError('Backend candidate name must be a safe nonempty path component')
+                names.append(candidate_name)
+            if len(names) != len(set(names)):
+                raise ConfigError('Backend candidate names must be unique')
         if name == 'benign':
             if 'order' in settings and 'orders' in settings:
                 raise ConfigError('experiments.benign must specify order or orders, not both')

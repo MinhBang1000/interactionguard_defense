@@ -1,5 +1,6 @@
 # InteractionGuard campaign. Edit this file only; the menu asks no parameters.
 version: 1
+primary_order: Screen-Gate-Audit
 naming:
   version: 2
   legacy:
@@ -316,6 +317,7 @@ experiments:
     orders: [Gate, Screen, Audit, Gate-Screen, Gate-Audit, Screen-Audit, Screen-Gate, Gate-Screen-Audit, Screen-Gate-Audit]
   baselines:
     resume: false
+    orders: [Screen-Gate-Audit, Gate-Screen-Audit]
     fpr_budget: 0.01
     sentinel:
       model: qualifire/prompt-injection-sentinel
@@ -347,7 +349,7 @@ experiments:
     channels: [prompt, retrieval, tool]
   backend:
     resume: false
-    order: Gate-Screen-Audit
+    order: Screen-Gate-Audit
     candidates:
       - name: llama31_8b
         backend: vllm
@@ -359,7 +361,7 @@ experiments:
         revision: 63a8b081895390a26e140280378bc85ec8bce07a
   threshold:
     resume: false
-    order: Gate-Screen-Audit
+    orders: [Screen-Gate-Audit, Gate-Screen-Audit]
     # Validation-derived gates, not numeric gates selected on the test set.
     recall_floors: [0.98, 0.99, 0.995, 0.999]
     include_validation_max_f1: true

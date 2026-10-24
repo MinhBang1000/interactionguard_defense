@@ -69,9 +69,9 @@ requires an explicit overwrite confirmation (default: No).
 | 0 | Full Dataset Preparation | Original raw traces, preserved split membership, judge cache/reviews |
 | 1 | Train and Calibrate Encoder + Gate | 0 |
 | 2 | Layer Configuration Comparison | 0, 1; Stage 2 also requires compatible Stage 1 |
-| 3 | Channel-Specific Baseline and ASR Comparison | 0, completed 2 including Gate-Screen-Audit |
+| 3 | Channel-Specific Baseline and ASR Comparison | 0, completed 2 including every requested order/seed |
 | 4 | Same-Audit Channel vs Full-History Comparison | 0 |
-| 5 | Audit Backend Comparison | Stage 1 of 2; configured order must exist there |
+| 5 | Audit Backend Comparison | Stage 1 of 2 including Screen-Gate-Audit for every seed |
 | 6 | Gate Threshold Sweep | Stage 1 of 2 |
 | 7 | Benign-Ratio Sweep | Stage 1 of 2 |
 | 8 | Backup Snapshot | Existing results/config; checkpoints optional |
@@ -184,18 +184,71 @@ as complete. No partial/mismatched result is silently scored benign.
 
 ## Experiments and Reporting
 
+The primary configuration is explicitly `primary_order: Screen-Gate-Audit`.
+Item 2 and Item 7 retain their existing scientific settings. Edit the following
+sections of the **same** YAML for the new comparisons:
+
+```yaml
+primary_order: Screen-Gate-Audit
+experiments:
+  baselines:                 # Item 3
+    orders: [Screen-Gate-Audit, Gate-Screen-Audit]
+  backend:                   # Item 5: one fixed upstream order
+    order: Screen-Gate-Audit
+    candidates:              # retain each candidate's actual model/revision/settings
+      - name: llama31_8b
+        backend: vllm
+        model: meta-llama/Llama-3.1-8B-Instruct
+  threshold:                 # Item 6
+    orders: [Screen-Gate-Audit, Gate-Screen-Audit]
+```
+
+This is a structural excerpt, not a replacement for the complete pinned YAML.
+Item 3/6 require nonempty, unique, valid orders including the primary order.
+Item 5 rejects other orders and duplicate/unsafe candidate names. Item 4 remains
+a channel/history ablation, not a cascade-order comparison. No new menu entries
+or runtime parameter questions are introduced.
+
 Item 3 uses Sentinel (prompt), RAGuard (retrieval), Prompt Guard 2 (tool payload),
 their OR combination, no defense and IG. Prompt Guard 2 replaces ToolResultParsing;
 this is not a reproduction of ToolResultParsing. Baselines are offline channel
 adaptations. Individual payload/window scores and channel verdicts are retained.
+The three baseline detectors run once, not once per IG order or seed. Their
+reports, combined OR and no defense remain at `baselines/<detector>/`.
+IG decisions are copied from compatible Item 2 results without new model calls:
+`baselines/seed_<seed>/InteractionGuard/<order>/`. Each `reuse.json` records the
+source checksums and explicitly labels inherited latency estimates. Summary
+conditions are `InteractionGuard/<order>`; deterministic baselines have one
+accuracy trial rather than invented five-run variability.
 
 Item 4 compares the same Audit on channels, channel OR and history, with explicit
 original-prompt anchoring. It saves complete-fragment correlated candidates;
 both fragments existing does not establish their joint causal necessity.
 
-Item 5 changes only Audit backend over fixed upstream routing. The supplied local
-candidates must be available in their configured environments. Item 6 sweeps
-validation-derived Gate gates, not test-selected numerical thresholds. Item 7
+Item 5 changes only Audit backend over fixed **Screen-Gate-Audit** Stage 1 routing.
+It preflights every seed before inference. Candidates receive identical **ordered**
+prefix IDs and payloads per seed, never regenerated Screen/Gate scores. Outputs
+remain `backend/seed_<seed>/<candidate>/`, with pending-set/routing hashes and
+ordered IDs in `routing_identity.json`. Reports score the entire pipeline, not
+only Audit's pending subset. Local candidates must already be cached; an explicitly
+configured OpenAI-compatible candidate uses the same pending set and requires its
+own API environment variable. No candidate is silently substituted.
+
+Item 6 reuses Stage 1 Gate test/validation scores and the shared Screen scores.
+Each seed's thresholds are selected **only on validation**, using the existing
+recall-floor/F1 policy. Both orders use the same threshold and ordered full-test
+IDs at each operating point. Screen/Audit models, Screen threshold and Audit
+policy stay fixed; new routing determines which Audit calls are needed. Outputs:
+`threshold/seed_<seed>/<operating_point>/<order>/`. Shared and per-order
+`operating_point.json` record score hashes, calibration and paired-workload hashes.
+Audit request/response records identify seed, operating point and order.
+Summary JSON/CSV includes F1, precision/recall/FPR/FNR, all component processing
+ratios, estimated pipeline time, category/macro/pooled ASR and benign episode
+false-blocking; detailed ASR files retain counts and detection timing.
+The main figure compares orders; `<order>/comparison.png` retains the complete
+F1/traffic/latency chart for each order. Legends sit above the data; no titles.
+
+Item 7
 samples 90/92/94/96/98% benign prefixes without replacement, with reproducible
 IDs and attack-category stratification, keeping thresholds fixed per seed.
 Item 7 now compares `experiments.benign.orders: [Gate-Screen-Audit, Screen-Gate-Audit]` on the
@@ -278,6 +331,24 @@ Receipts bind the original manifest SHA/signature to the exact upgraded signatur
 integrity checks or accept later code/model/data changes. The benign-order upgrade
 preserves the verified Item 0-2 prerequisites this way; it does not retrain them.
 Keep these receipts in result backups; do not fabricate or manually update them.
+
+The multi-configuration upgrade uses `tools/upgrade_multiconfig.py` with an
+explicit **pre-edit** capture. On this installation the verified capture is
+`backup/multiconfig_20261024_d0c5244/`. It contains original source/config and
+manifest/file hashes, plus `upgrade_record.json` after application. Completed
+dataset/training/configuration/benign files are not rewritten; only exact-bound
+compatibility receipts are published. The original naming-migration backup still
+contains the full result/weight backup. No rerun of Items 0/1/2/7 is required for
+this audited upgrade. A model/data/threshold/prompt change still invalidates reuse.
+
+For maintainers only: capture BEFORE editing with
+`python tools/upgrade_multiconfig.py capture --backup <new-directory>`; inspect
+`python tools/upgrade_multiconfig.py apply --backup <directory>` (dry-run), then
+add `--apply` only for the reviewed code-only upgrade. The tool rejects changes
+outside the declared source/config scope, verifies original files, and restores
+previous receipts on verification failure. Do not recapture or reseal to bypass
+a scientific incompatibility, or edit sources during sealing. Normal experiment
+execution never runs this upgrade automatically.
 
 Item 8 creates a timestamped ZIP in `backup/` using the configured scope. It
 includes run-effective configs, checksums and a backup manifest, validates ZIP

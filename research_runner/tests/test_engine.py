@@ -357,6 +357,31 @@ class EngineTests(unittest.TestCase):
         channels = {call[2] for call in self.backend.calls if call[0] == "score_detector"}
         self.assertIn(("prompt",), channels)
         self.assertIn(("tool",), channels)
+        summary = read_json(directory / 'summary.json')
+        for name in ('sentinel', 'prompt_guard', 'raguard', 'combined_or', 'no_defense'):
+            self.assertEqual(summary[name]['trials'], 1)
+            self.assertIn('not_independent_repeats', summary[name]['variation'])
+        for seed in self.config['training']['seeds']:
+            for order in self.config['experiments']['baselines']['orders']:
+                target = directory / f'seed_{seed}/InteractionGuard/{order}'
+                source = self.results / f'configuration_stage2/seed_{seed}/{order}/prefix_decisions.jsonl'
+                reused = self.verify_report(target, ids)
+                self.assertEqual([{k: v for k, v in d.items() if k not in ('seed', 'configuration')}
+                                  for d in reused], read_jsonl(source))
+                provenance = read_json(target / 'reuse.json')
+                self.assertEqual(provenance['source_sha256'], file_sha256(source))
+                self.assertEqual(provenance['new_inference_calls'], 0)
+                self.assertEqual(provenance['primary'], order == self.config['primary_order'])
+                group = summary[f'InteractionGuard/{order}']
+                self.assertEqual(group['trials'], len(self.config['training']['seeds']))
+                asr = read_json(target / 'asr.json')
+                self.assertIn('macro', group['asr'])
+                self.assertEqual(group['asr']['categories']['correlated']['attempts_per_trial'],
+                                 [asr['per_attack_type']['correlated']['total']] * group['trials'])
+        table = (directory / 'summary.csv').read_text()
+        for order in self.config['experiments']['baselines']['orders']:
+            self.assertIn(f'InteractionGuard/{order}', table)
+        self.assertIn('asr.category.correlated', table)
 
     def verify_channels(self, rows):
         directory = self.results / "channel_ablation"
@@ -376,22 +401,155 @@ class EngineTests(unittest.TestCase):
 
     def verify_backends(self, first):
         for seed in (42, 43):
-            expected = {r["prefix_id"] for r in read_jsonl(first / f"seed_{seed}/audit_requests.jsonl")
-                        if r["configuration"] == "Gate-Screen-Audit"}
+            order = self.config['experiments']['backend']['order']
+            expected = [r for r in read_jsonl(first / f"seed_{seed}/audit_requests.jsonl")
+                        if r["configuration"] == order]
             identities = []
             for candidate in self.config["experiments"]["backend"]["candidates"]:
                 directory = self.results / f"backend/seed_{seed}/{candidate['name']}"
                 identities.append(read_json(directory / "routing_identity.json")["pending_set_sha256"])
                 requests = read_jsonl(directory / "audit/requests.jsonl")
-                self.assertEqual({r["prefix_id"] for r in requests}, expected)
+                self.assertEqual(requests, expected)
+                identity = read_json(directory / 'routing_identity.json')
+                self.assertEqual(identity['configuration'], 'Screen-Gate-Audit')
+                self.assertEqual(identity['ordered_prefix_ids'], [r['prefix_id'] for r in expected])
             self.assertEqual(len(set(identities)), 1)
 
     def verify_thresholds(self):
+        paired = {}
         for path in (self.results / "threshold").rglob("operating_point.json"):
             report = read_json(path)
             self.assertEqual(report["selection_source"], "validation_only")
             self.assertTrue(report["other_models_and_policies_fixed"])
             self.assertEqual(report["gate"]["objective"], "max_validation_f1_subject_to_recall_floor")
+            key = (report['seed'], report['operating_point'])
+            shared = {k: v for k, v in report.items() if k not in ('configuration', 'primary')}
+            if key not in paired:
+                paired[key] = (shared, set())
+            self.assertEqual(paired[key][0], shared)
+            if 'configuration' in report:
+                order = report['configuration']
+                paired[key][1].add(order)
+                decisions = read_jsonl(path.parent / 'prefix_decisions.jsonl')
+                self.assertEqual([d['id'] for d in decisions], report['sample_ids'])
+                self.assertTrue(all(d['route'][0]['layer'] == order.split('-')[0] for d in decisions))
+        for shared, orders in paired.values():
+            self.assertEqual(orders, set(self.config['experiments']['threshold']['orders']))
+        summary = read_json(self.results / 'threshold/summary.json')
+        expected = {f'{point}/{order}' for _, point in paired
+                    for order in self.config['experiments']['threshold']['orders']}
+        self.assertEqual(set(summary), expected)
+        self.assertTrue(all('asr' in value for value in summary.values()))
+
+    def test_multi_configuration_reuses_scores_verdicts_and_preserves_prerequisites(self):
+        self.prepare(full=True)
+        frozen = self.snapshot_artifacts()
+        settings = deepcopy(self.config)
+        before = len(self.backend.calls)
+        self.runner.run(3)
+        calls = self.backend.calls[before:]
+        self.assertFalse(any(c[0] in ('train', 'score_gate', 'infer_audit') for c in calls))
+        self.verify_baselines([r['id'] for r in self.runner.rows()])
+        for item in (5, 6):
+            before = len(self.backend.calls)
+            self.runner.run(item)
+            self.assertTrue(all(c[0] == 'infer_audit' for c in self.backend.calls[before:]))
+        self.verify_backends(self.results / 'configuration_stage1')
+        self.verify_thresholds()
+        self.assertEqual(settings, self.config)
+        after = self.snapshot_artifacts()
+        self.assertTrue(all(after[path] == digest for path, digest in frozen.items()))
+        for name, item in (('baselines', 3), ('backend', 5), ('threshold', 6)):
+            self.config['experiments'][name]['resume'] = True
+            before = len(self.executor.calls)
+            self.runner.run(item)
+            self.assertEqual(len(self.executor.calls), before)
+
+    def test_missing_baseline_order_is_rejected_before_detector_calls(self):
+        self.config['experiments']['configuration']['orders'] = ['Gate-Screen-Audit']
+        self.prepare(full=True)
+        calls = len(self.executor.calls)
+        with self.assertRaisesRegex(ValueError, 'Missing Experiment 2 configuration Screen-Gate-Audit'):
+            self.runner.run(3)
+        self.assertEqual(calls, len(self.executor.calls))
+        self.assertFalse((self.results / 'baselines').exists())
+
+    def test_threshold_reroutes_each_order_with_the_same_scores_and_threshold(self):
+        self.prepare(training=True)
+        rows = self.runner.rows()
+        selected = next(r['id'] for r in rows if r['label'] and r['step_number'] % 2)
+        original = self.backend.score_gate
+        def scores(samples, checkpoint):
+            records = original(samples, checkpoint)
+            return [{**r, 'score': .05} if r['id'] == selected else r for r in records]
+        with patch.object(self.backend, 'score_gate', side_effect=scores):
+            self.runner.configuration_stage1()
+        before = len(self.backend.calls)
+        self.runner.run(6)
+        self.assertTrue(all(c[0] == 'infer_audit' for c in self.backend.calls[before:]))
+        for seed in self.config['training']['seeds']:
+            point = self.results / f'threshold/seed_{seed}/validation_max_f1'
+            lookup = {}
+            for order in self.config['experiments']['threshold']['orders']:
+                decisions = read_jsonl(point / order / 'prefix_decisions.jsonl')
+                lookup[order] = next(r for r in decisions if r['id'] == selected)
+                requests = read_jsonl(point / order / 'audit/requests.jsonl')
+                self.assertTrue(all(r['seed'] == seed and r['configuration'] == order
+                                    and r['operating_point'] == 'validation_max_f1' for r in requests))
+            self.assertEqual(lookup['Screen-Gate-Audit']['prediction'], 1)
+            self.assertEqual(lookup['Gate-Screen-Audit']['prediction'], 0)
+        self.verify_thresholds()
+
+    def test_backend_missing_primary_order_aborts_before_inference(self):
+        self.config['experiments']['configuration']['orders'] = ['Gate-Screen-Audit']
+        self.prepare(training=True)
+        self.runner.configuration_stage1()
+        before = len(self.executor.calls)
+        with self.assertRaisesRegex(ValueError, 'Missing Experiment 2 configuration Screen-Gate-Audit'):
+            self.runner.run(5)
+        self.assertEqual(len(self.executor.calls), before)
+        self.assertFalse((self.results / 'backend').exists())
+
+    def test_backend_requests_reject_missing_duplicate_reordered_or_wrong_payload(self):
+        self.prepare(training=True)
+        self.runner.configuration_stage1()
+        first = self.results / 'configuration_stage1'
+        rows = self.runner.rows()
+        source = first / 'seed_42/audit_requests.jsonl'
+        original = read_jsonl(source)
+        pending = [r for r in original if r['configuration'] == 'Screen-Gate-Audit']
+        self.assertGreater(len(pending), 1)
+        other = [r for r in original if r['configuration'] != 'Screen-Gate-Audit']
+        for altered in (pending[:-1], pending + pending[:1], list(reversed(pending)),
+                        [{**pending[0], 'payload': 'different'}, *pending[1:]],
+                        [{**pending[0], 'seed': 43}, *pending[1:]]):
+            write_jsonl(source, other + altered)
+            with self.subTest(altered=altered[0]), self.assertRaisesRegex(ValueError, 'pending requests|mismatch'):
+                self.runner._backend_inputs(first, 42, rows, 'Screen-Gate-Audit')
+        write_jsonl(source, original)
+        path = first / 'seed_42/Screen-Gate-Audit/routing.jsonl'
+        decisions = read_jsonl(path)
+        for altered in (decisions[:-1], decisions + decisions[:1], list(reversed(decisions)),
+                        [{**decisions[0], 'label': 1 - decisions[0]['label']}, *decisions[1:]]):
+            write_jsonl(path, altered)
+            with self.assertRaisesRegex(ValueError, 'IDs|metadata mismatch'):
+                self.runner._backend_inputs(first, 42, rows, 'Screen-Gate-Audit')
+
+    def test_threshold_atomic_failure_preserves_completed_multi_configuration_results(self):
+        self.prepare(training=True)
+        self.runner.configuration_stage1()
+        self.runner.run(6)
+        before = self.snapshot_artifacts()
+        with self.assertRaises(ExistingResultsError):
+            self.runner.run(6)
+        self.backend.fail_next_inference = True
+        with self.assertRaisesRegex(RuntimeError, 'interrupted'):
+            self.runner.run(6, overwrite=True)
+        after = self.snapshot_artifacts()
+        self.assertTrue(all(after[path] == digest for path, digest in before.items()))
+        self.assertTrue(all(path.startswith('.failed/') for path in after.keys() - before.keys()))
+        self.verify_artifact('threshold')
+        self.assertFalse(list((self.results / '.staging').iterdir()))
 
     def verify_benign_workloads(self, allowed_ids):
         paired = {}

@@ -146,6 +146,45 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ConfigError):
                 self.load(config)
 
+    def test_multi_configuration_orders_and_primary_are_validated(self):
+        orders = ['Screen-Gate-Audit', 'Gate-Screen-Audit']
+        for name in ('baselines', 'threshold'):
+            self.value['experiments'][name] = {'orders': orders}
+        config = self.load()
+        self.assertEqual(config['primary_order'], orders[0])
+        for name in ('baselines', 'threshold'):
+            self.assertEqual(config['experiments'][name]['orders'], orders)
+            for settings in ({}, {'order': orders[0]}, {'orders': []},
+                             {'orders': [orders[0], orders[0]]}, {'orders': [orders[1]]},
+                             {'orders': ['Screen-Unknown-Audit']},
+                             {'orders': orders, 'order': orders[0]}):
+                value = copy.deepcopy(self.value)
+                value['experiments'][name] = settings
+                with self.subTest(name=name, settings=settings), self.assertRaises(ConfigError):
+                    self.load(value)
+        for primary in ('Audit-Gate', '', None, ['Screen-Gate-Audit']):
+            value = copy.deepcopy(self.value)
+            value['primary_order'] = primary
+            with self.subTest(primary=primary), self.assertRaises(ConfigError):
+                self.load(value)
+
+    def test_backend_is_fixed_to_primary_screen_gate_audit_and_safe_unique_candidates(self):
+        self.value['experiments']['backend'] = {
+            'order': 'Screen-Gate-Audit', 'candidates': [{'name': 'local', 'model': 'fake'}]}
+        self.load()
+        for changes in ({'order': 'Gate-Screen-Audit'}, {'order': None},
+                        {'orders': ['Screen-Gate-Audit']}, {'candidates': []},
+                        {'candidates': [{'name': '../escape'}]},
+                        {'candidates': [{'name': 'x'}, {'name': 'x'}]},
+                        {'candidates': [None]}, {'candidates': [{}]}):
+            value = copy.deepcopy(self.value)
+            value['experiments']['backend'].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ConfigError):
+                self.load(value)
+        self.value['primary_order'] = 'Gate-Screen-Audit'
+        with self.assertRaisesRegex(ConfigError, 'match primary_order'):
+            self.load()
+
     def test_inline_content_hashes(self):
         model = self.value["models"]["audit"]
         model["system_prompt_sha256"] = hashlib.sha256(model["system_prompt"].encode()).hexdigest()
