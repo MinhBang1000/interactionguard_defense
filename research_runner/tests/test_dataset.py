@@ -10,12 +10,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from data.data_preprocess import normalize_trace, read_jsonl, sha256, write_json, write_jsonl
-from data.data_split import SOURCES, SPLITS
-from data.prepare_training import load_prepared
-from data.test_preprocessing import episode
-from eval.asr import episode_hash, original_outcome
-from eval.prompt_success_judge import PROMPT_VERSION
+from research_runner.implementation.data.data_preprocess import normalize_trace, read_jsonl, sha256, write_json, write_jsonl
+from research_runner.implementation.data.data_split import SOURCES, SPLITS
+from research_runner.implementation.data.prepare_training import load_prepared
+from research_runner.tests.fixtures import episode
+from research_runner.implementation.evaluation.asr import episode_hash, original_outcome
+from research_runner.implementation.evaluation.prompt_success_judge import PROMPT_VERSION
 from research_runner.dataset import prepare_dataset
 
 
@@ -28,9 +28,9 @@ class DatasetTests(unittest.TestCase):
         self.subprocess = contexts.enter_context(patch(
             "research_runner.dataset.subprocess.run",
             side_effect=AssertionError("A real subprocess must not run in dataset tests")))
-        contexts.enter_context(patch("eval.prompt_success_judge.judge_episode",
+        contexts.enter_context(patch("research_runner.implementation.evaluation.prompt_success_judge.judge_episode",
                                 side_effect=AssertionError("No model calls")))
-        contexts.enter_context(patch("eval.prompt_success_judge.run_vllm",
+        contexts.enter_context(patch("research_runner.implementation.evaluation.prompt_success_judge.run_vllm",
                                 side_effect=AssertionError("No GPU calls")))
         self.root = self.folder / "source/data"
         self.output = self.folder / "staging/data"
@@ -87,7 +87,7 @@ class DatasetTests(unittest.TestCase):
     def _enable_judge(self):
         self.config["data"]["judge"] = {
             "skip": False, "backend": "vllm", "base_url": "http://127.0.0.1:9999/v1"}
-        self.config["runtime"] = {"python": sys.executable, "l3_python": sys.executable}
+        self.config["runtime"] = {"python": sys.executable, "audit_python": sys.executable}
 
     def test_full_preparation_preserves_inputs_membership_and_policies(self):
         before = self._snapshot()
@@ -185,7 +185,7 @@ class DatasetTests(unittest.TestCase):
         self.judges.unlink()
         self.reviews.unlink()
         before = self._snapshot()
-        self.config["runtime"] = {"l3_python": sys.executable}
+        self.config["runtime"] = {"audit_python": sys.executable}
         result = prepare_dataset(self.config, self.output)
         self.assertTrue(result["judge"]["skip"])
         self.assertEqual(result["judge"]["pending_episodes"], 3)
@@ -237,7 +237,7 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(stderr, subprocess.STDOUT)
             self.assertTrue(stdout.writable())
             self.assertEqual(command[0], sys.executable)
-            self.assertEqual(command[1:3], ["-m", "eval.prompt_success_judge"])
+            self.assertEqual(command[1:3], ["-m", "research_runner.implementation.evaluation.prompt_success_judge"])
             self.assertEqual(cwd, Path(self.config["paths"]["workspace"]))
             self.assertTrue(check)
             self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
@@ -281,7 +281,7 @@ class DatasetTests(unittest.TestCase):
         interpreter = self.folder / ".venv/bin/python"
         interpreter.parent.mkdir(parents=True)
         interpreter.symlink_to(sys.executable)
-        self.config["runtime"]["l3_python"] = str(interpreter)
+        self.config["runtime"]["audit_python"] = str(interpreter)
         self.config["data"]["judge"]["base_url"] = None
         write_jsonl(self.judges, [])
 
@@ -353,7 +353,7 @@ class DatasetTests(unittest.TestCase):
 
     def test_failed_judge_propagates_without_modifying_inputs(self):
         self._enable_judge()
-        del self.config["runtime"]["l3_python"]
+        del self.config["runtime"]["audit_python"]
         self.config["data"]["judge"]["backend"] = "openai-compatible"
         write_jsonl(self.judges, [])
         before = self._snapshot()

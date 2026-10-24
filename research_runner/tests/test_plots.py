@@ -19,7 +19,7 @@ class PlotTests(unittest.TestCase):
             summary[name] = {'trials': 5, 'metrics': {
                 'f1': {'mean': .88, 'std': .01},
                 'estimated_pipeline_seconds_per_sample': {'mean': latency, 'std': .02}},
-                'traffic': {layer: {'mean': .05, 'std': .01} for layer in ('L1', 'L2', 'L3')}}
+                'traffic': {layer: {'mean': .05, 'std': .01} for layer in ('Gate', 'Screen', 'Audit')}}
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'MPLCONFIGDIR': temp}):
             output = render(summary, temp)
             self.assertEqual(output['created'], ['comparison.png'])
@@ -28,19 +28,19 @@ class PlotTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec('matplotlib'), 'Optional matplotlib is not installed')
     def test_paired_benign_comparison_and_per_order_traffic_plots(self):
         summary = {}
-        for order in ('L1-L2-L3', 'L2-L1-L3'):
+        for order in ('Gate-Screen-Audit', 'Screen-Gate-Audit'):
             for ratio in (90, 98):
                 summary[f'benign_{ratio}/{order}'] = {'trials': 5, 'metrics': {
                     'f1': {'mean': .85, 'std': .02},
                     'estimated_pipeline_seconds_per_sample': {'mean': .2, 'std': .01}},
-                    'traffic': {layer: {'mean': .1, 'std': .01} for layer in ('L1', 'L2', 'L3')}}
+                    'traffic': {layer: {'mean': .1, 'std': .01} for layer in ('Gate', 'Screen', 'Audit')}}
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'MPLCONFIGDIR': temp}):
             result = render(summary, temp)
             self.assertEqual(set(result['created']), {'comparison.png',
-                'L1-L2-L3/comparison.png', 'L2-L1-L3/comparison.png'})
+                'Gate-Screen-Audit/comparison.png', 'Screen-Gate-Audit/comparison.png'})
             for name in result['created']:
                 self.assertGreater((Path(temp) / name).stat().st_size, 1000)
-            summary.pop('benign_98/L2-L1-L3')
+            summary.pop('benign_98/Screen-Gate-Audit')
             with self.assertRaisesRegex(ValueError, 'every configuration'):
                 render(summary, temp)
 

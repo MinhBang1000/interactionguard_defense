@@ -8,12 +8,12 @@ from research_runner.engine import ResearchRunner
 
 MENU = {
     '0': 'Full Dataset Preparation',
-    '1': 'Train and Calibrate Encoder + Layer 1',
+    '1': 'Train and Calibrate Encoder + Gate',
     '2': 'Layer Configuration Comparison',
     '3': 'Channel-Specific Baseline and ASR Comparison',
-    '4': 'Same-L3 Channel vs Full-History Comparison',
-    '5': 'Layer 3 Backend Comparison',
-    '6': 'Layer 1 Threshold Sweep',
+    '4': 'Same-Audit Channel vs Full-History Comparison',
+    '5': 'Audit Backend Comparison',
+    '6': 'Gate Threshold Sweep',
     '7': 'Benign-Ratio Sweep',
     '8': 'Backup Snapshot',
 }

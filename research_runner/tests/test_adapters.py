@@ -15,9 +15,9 @@ import weakref
 from research_runner import adapters as a
 
 
-def l3_config():
+def audit_config():
     from research_runner.config import load_config
-    config = copy.deepcopy(load_config(a.ROOT / "config/experiments.yaml")["models"]["l3"])
+    config = copy.deepcopy(load_config(a.ROOT / "config/experiments.yaml")["models"]["audit"])
     if "system_prompt" in config:
         config["prompt"] = config.pop("system_prompt")
     return config
@@ -181,9 +181,9 @@ class DetectorTests(unittest.TestCase):
 
 
 class L1AndTrainingTests(unittest.TestCase):
-    def test_l1_strict_threshold_timing_no_legacy_cache_and_one_seed_resident(self):
+    def test_gate_strict_threshold_timing_no_legacy_cache_and_one_seed_resident(self):
         backend = a.RealBackend({})
-        checkpoint = {"encoder_path": "/mock/encoder", "ae_path": "/mock/ae", "l1_threshold": .5}
+        checkpoint = {"encoder_path": "/mock/encoder", "ae_path": "/mock/ae", "gate_threshold": .5}
         references = []
         clock = [0.]
         def load(meta, device):
@@ -198,31 +198,31 @@ class L1AndTrainingTests(unittest.TestCase):
             model.compute_reconstruction_errors.return_value = [.5, .6]
             references.append(weakref.ref(model))
             return model
-        with patch.object(a, "_load_l1", side_effect=load), patch.object(a.time, "perf_counter", side_effect=lambda: clock[0]), patch.object(a, "_release_gpu_cache"):
-            first = backend.score_l1(rows("x", "y"), checkpoint)
+        with patch.object(a, "_load_gate", side_effect=load), patch.object(a.time, "perf_counter", side_effect=lambda: clock[0]), patch.object(a, "_release_gpu_cache"):
+            first = backend.score_gate(rows("x", "y"), checkpoint)
             self.assertEqual([item["decision"] for item in first], ["Forward", "Stop"])
             self.assertEqual(first[0]["seconds"], 1.)
-            backend.score_l1(rows("x", "y"), {**checkpoint, "ae_path": "/mock/ae2"})
-            self.assertEqual(len(backend._l1), 1)
+            backend.score_gate(rows("x", "y"), {**checkpoint, "ae_path": "/mock/ae2"})
+            self.assertEqual(len(backend._gate), 1)
             self.assertIsNone(references[0]())
 
-    def test_l1_hash_mismatch_fails_before_importing_models(self):
+    def test_gate_hash_mismatch_fails_before_importing_models(self):
         with tempfile.TemporaryDirectory() as directory:
             encoder = Path(directory) / "encoder"
             encoder.mkdir()
             (encoder / "training_config.json").write_text('{"trust_remote_code": false}')
             ae = Path(directory) / "ae.pth"
             ae.write_bytes(b"not real weights")
-            meta = {"encoder_path": str(encoder), "ae_path": str(ae), "l1_threshold": .5, "encoder_sha256": "wrong"}
+            meta = {"encoder_path": str(encoder), "ae_path": str(ae), "gate_threshold": .5, "encoder_sha256": "wrong"}
             with self.assertRaisesRegex(ValueError, "Encoder hash"):
-                a._load_l1(meta, "cpu")
+                a._load_gate(meta, "cpu")
             meta.update(encoder_sha256=a._directory_hash(encoder), ae_sha256="wrong")
             with self.assertRaisesRegex(ValueError, "Autoencoder hash"):
-                a._load_l1(meta, "cpu")
+                a._load_gate(meta, "cpu")
 
     def test_explicit_recipe_ignores_selected_deployment_defaults(self):
         encoder, ae, recall = a._training_recipe({"training": {"calibration": {
-            "l1_recall_floor": .999, "ae_selection_recall_floor": .98}}})
+            "gate_recall_floor": .999, "ae_selection_recall_floor": .98}}})
         self.assertEqual(encoder["max_length"], 8192)
         self.assertEqual(ae["hidden_dims"], [512, 256, 128])
         self.assertEqual(recall, .98)
@@ -243,10 +243,10 @@ class L1AndTrainingTests(unittest.TestCase):
                 self.assertEqual(request["config"]["data"]["_prepared_root"], str(prepared))
                 self.assertEqual(kwargs["env"]["HF_HUB_OFFLINE"], "1")
                 self.assertEqual(kwargs["env"]["CUDA_VISIBLE_DEVICES"], "1")
-                Path(command[-1]).write_text(json.dumps({"encoder_path": "/mock/encoder", "ae_path": "/mock/ae", "l1_threshold": .5}))
+                Path(command[-1]).write_text(json.dumps({"encoder_path": "/mock/encoder", "ae_path": "/mock/ae", "gate_threshold": .5}))
             with patch.object(a.subprocess, "run", side_effect=run):
                 result = a.RealBackend(config).train(42, root / "model")
-            self.assertEqual(result["l1_threshold"], .5)
+            self.assertEqual(result["gate_threshold"], .5)
 
     def test_publication_rebases_only_output_prefix(self):
         result = a._publish_paths({"encoder_path": "/stage/model/encoder", "external": "/stage/model2/encoder", "seed": 42}, Path("/stage/model"), Path("/final/model"))
@@ -256,29 +256,29 @@ class L1AndTrainingTests(unittest.TestCase):
 
 class L3Tests(unittest.TestCase):
     def test_inline_config_never_reads_historical_results(self):
-        config = l3_config()
+        config = audit_config()
         with patch.object(a, "_read_json", side_effect=AssertionError("Historical file read")), patch.object(Path, "read_text", side_effect=AssertionError("Historical file read")):
-            result = a._l3_config(config)
+            result = a._audit_config(config)
         self.assertEqual(result["prompt"], config["prompt"])
         self.assertEqual(result["schema"], config["schema"])
         for missing in ("prompt", "schema", "max_tokens"):
             invalid = copy.deepcopy(config)
             invalid.pop(missing)
             with self.assertRaises(ValueError):
-                a._l3_config(invalid)
+                a._audit_config(invalid)
 
     def test_prompt_schema_revision_and_secret_validation(self):
-        config = l3_config()
+        config = audit_config()
         invalid = [{**config, "prompt": "different"}, {**config, "revision": "main"}, {**config, "api_key": "not-a-real-key"}]
         schema = copy.deepcopy(config["schema"])
         schema["additionalProperties"] = True
         invalid.append({**config, "schema": schema})
         for item in invalid:
             with self.assertRaises(ValueError):
-                a._l3_config(item)
+                a._audit_config(item)
 
     def test_vllm_request_ids_verdict_or_tokens_batching_and_timing(self):
-        config = l3_config()
+        config = audit_config()
         config["batch_size"] = 1
         clock = [0.]
         tokenizer = SimpleNamespace(apply_chat_template=lambda messages, **kwargs: messages[-1]["content"], encode=lambda text, **kwargs: [1, 2])
@@ -290,9 +290,9 @@ class L3Tests(unittest.TestCase):
         def load(cfg):
             clock[0] += 100
             return engine, object()
-        backend = a.RealBackend({"models": {"l3": config}})
+        backend = a.RealBackend({"models": {"audit": config}})
         with patch.object(backend, "_vllm", side_effect=load), patch.object(a.time, "perf_counter", side_effect=lambda: clock[0]):
-            result = backend.infer_l3([{"request_id": "0:opaque", "payload": "x"}, {"request_id": "1:opaque", "payload": "x"}])
+            result = backend.infer_audit([{"request_id": "0:opaque", "payload": "x"}, {"request_id": "1:opaque", "payload": "x"}])
         self.assertEqual([item["request_id"] for item in result], ["0:opaque", "1:opaque"])
         self.assertEqual([item["prediction"] for item in result], [1, 1])
         self.assertEqual(result[0]["seconds"], 3.)
@@ -300,40 +300,40 @@ class L3Tests(unittest.TestCase):
         self.assertEqual(engine.generate.call_count, 2)
 
     def test_invalid_outputs_never_fall_open(self):
-        config = a._l3_config(l3_config())
+        config = a._audit_config(audit_config())
         item = {"request_id": "i:hash", "payload": "x"}
         for text, finish in ((json.dumps(verdict()), "length"), ("{}", "stop"),
                              (json.dumps(verdict(tool_attack="false")), "stop"),
                              (json.dumps(verdict(confidence=float("nan"))), "stop")):
             with self.subTest(text=text), self.assertRaises(ValueError):
-                a._l3_result(item, text, finish, config, 1)
-        backend = a.RealBackend({"models": {"l3": l3_config()}})
+                a._audit_result(item, text, finish, config, 1)
+        backend = a.RealBackend({"models": {"audit": audit_config()}})
         with patch.object(backend, "_vllm", side_effect=RuntimeError("secret must not escape")):
-            result = backend.infer_l3([item])[0]
+            result = backend.infer_audit([item])[0]
         self.assertIsNone(result["prediction"])
         self.assertIsNone(result["verdict"])
         self.assertNotIn("secret", json.dumps(result))
 
     def test_context_overflow_does_not_generate(self):
-        config = l3_config()
+        config = audit_config()
         config["max_model_len"] = 512
         tokenizer = SimpleNamespace(apply_chat_template=lambda *args, **kwargs: "x", encode=lambda *args, **kwargs: [1])
         engine = SimpleNamespace(get_tokenizer=lambda: tokenizer, generate=Mock())
-        backend = a.RealBackend({"models": {"l3": config}})
+        backend = a.RealBackend({"models": {"audit": config}})
         with patch.object(backend, "_vllm", return_value=(engine, None)):
-            result = backend.infer_l3([{"request_id": "id", "payload": "x"}])[0]
+            result = backend.infer_audit([{"request_id": "id", "payload": "x"}])[0]
         self.assertIsNone(result["prediction"])
         engine.generate.assert_not_called()
 
     def test_http_uses_env_bearer_and_strict_schema_without_saving_secret(self):
-        config = {**l3_config(), "backend": "openai-compatible", "base_url": "https://example.test/v1",
+        config = {**audit_config(), "backend": "openai-compatible", "base_url": "https://example.test/v1",
                   "api_key_env": "ADAPTER_TEST_KEY", "max_retries": 1}
         body = {"choices": [{"message": {"content": json.dumps(verdict())}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 3}}
         opener = Mock()
         opener.open.return_value = io.StringIO(json.dumps(body))
         with patch.dict(os.environ, {"ADAPTER_TEST_KEY": "test-secret"}), patch.object(a.urllib_request, "build_opener", return_value=opener):
-            result = a.RealBackend({"models": {"l3": config}}).infer_l3([{"request_id": "id", "payload": "text"}])[0]
+            result = a.RealBackend({"models": {"audit": config}}).infer_audit([{"request_id": "id", "payload": "text"}])[0]
         request = opener.open.call_args.args[0]
         self.assertEqual(request.get_header("Authorization"), "Bearer test-secret")
         self.assertTrue(json.loads(request.data)["response_format"]["json_schema"]["strict"])
@@ -372,7 +372,7 @@ class RAGTests(unittest.TestCase):
                 except Exception:
                     return {"pred": 0, "raguard_doc_results": [{"reason": "error: failure"}]}
         module = SimpleNamespace(RAGuardDetector=Detector)
-        with patch.dict(sys.modules, {"models.baseline.raguard": module}), patch.object(a, "_snapshot", return_value="/mock/gpt2"):
+        with patch.dict(sys.modules, {"research_runner.implementation.baselines.raguard": module}), patch.object(a, "_snapshot", return_value="/mock/gpt2"):
             result = a.RealBackend({}).score_rag(rows("ok", "fail"), [{"label": 0, "sequence": "benign"}], cfg)
         self.assertEqual(result[0]["prediction"], 1)
         self.assertEqual(result[0]["score_kind"], "native_binary_not_probability")

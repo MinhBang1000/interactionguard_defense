@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "copied_from": {
+    "data/data_preprocess.py": {
+      "destination": "research_runner/implementation/data/data_preprocess.py",
+      "original_sha256": "b05564d32f1e9eb6f4dc9b04c542d8cfa1fb6de93418d3805b908ba36f7d988b"
+    },
+    "data/data_split.py": {
+      "destination": "research_runner/implementation/data/data_split.py",
+      "original_sha256": "29773e6f2b5fc48c10d6b24bd6a60cb3f9333c3581ee5176ac22e589ab77200c"
+    },
+    "data/prepare_training.py": {
+      "destination": "research_runner/implementation/data/prepare_training.py",
+      "original_sha256": "ee1fb3ed6839b527bf12c7056ee4cd4f8cb1b0d6df902788a7d9fc4d96f2b0b9"
+    },
+    "data/training_policy.py": {
+      "destination": "research_runner/implementation/data/training_policy.py",
+      "original_sha256": "5844b033b168ce02913ca95b0d3de458f4c414cc0305ee9895c0bd6d218eee7f"
+    },
+    "data/annotate_raw.py": {
+      "destination": "research_runner/implementation/data/annotate_raw.py",
+      "original_sha256": "1844bf800e536f20368ddbef9b3c4d18f26531d3ac7f6e9341d46f619e6e2037"
+    },
+    "eval/asr.py": {
+      "destination": "research_runner/implementation/evaluation/asr.py",
+      "original_sha256": "ab4c08e047d9f6f4c3dbe80df31b8a3b6bf17f96db8d0da5ac9ed3019fd8ab95"
+    },
+    "eval/annotate_trace_outcomes.py": {
+      "destination": "research_runner/implementation/evaluation/annotate_trace_outcomes.py",
+      "original_sha256": "b097ba17cefe4944363dd1261a51cbdaaaa2fe454982fd6199ee6954e16e822f"
+    },
+    "eval/prompt_success_judge.py": {
+      "destination": "research_runner/implementation/evaluation/prompt_success_judge.py",
+      "original_sha256": "f063f8684b2bcf83a4656b3d1cdf59301b02d9d95deb8f4df92e3193c87f043d"
+    },
+    "training/modernbert_finetune.py": {
+      "destination": "research_runner/implementation/training/modernbert_finetune.py",
+      "original_sha256": "307beefc8795a2a7bff3be8f80824fda63d6c8312e82052b5ad9d5388ffbbcf1"
+    },
+    "training/autoencoder_training.py": {
+      "destination": "research_runner/implementation/training/autoencoder_training.py",
+      "original_sha256": "fc5eb67e904b2478b899c407622174611ea1e675eee56bf8026f4bd207a306c1"
+    },
+    "training/layer1_common.py": {
+      "destination": "research_runner/implementation/training/gate_common.py",
+      "original_sha256": "7c2a37b57ef7768efe05603bcd6a7f7e92a6f28b55850dbd4ef535c2e8cd15fd"
+    },
+    "models/detectors/layer1_detector.py": {
+      "destination": "research_runner/implementation/detectors/gate.py",
+      "original_sha256": "900faf63b37b835e012cad577c92de26d5f9187baafa9b28f66eadc5da42e2ec"
+    },
+    "models/detectors/channel_payloads.py": {
+      "destination": "research_runner/implementation/detectors/channel_payloads.py",
+      "original_sha256": "bc441dc82a471921969ffd0c4ccd96b52c6fbf975d7f502c63ed5c7d635e572c"
+    },
+    "models/baseline/raguard.py": {
+      "destination": "research_runner/implementation/baselines/raguard.py",
+      "original_sha256": "b158e8751325bfcdf424dd2a02ab58292e527245e2f9a5f8a384dffd85edbdb0"
+    }
+  },
+  "frozen_rules_sha256": "b05564d32f1e9eb6f4dc9b04c542d8cfa1fb6de93418d3805b908ba36f7d988b",
+  "payload_rules_semantic_sha256": "08f42ab9439c309477b9c5f433b53967ebaf039e922609d8cb8375d36a633e0a"
+}

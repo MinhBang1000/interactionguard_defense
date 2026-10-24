@@ -27,8 +27,8 @@ class ConfigTests(unittest.TestCase):
             "version": 1,
             "paths": {"workspace": "..", "results": "results", "backup": "backup"},
             "experiments": {"configuration": {
-                "terminal_policy": "binary_at_own_threshold", "orders": ["L1-L2-L3"]}},
-            "models": {"l3": {"api_key_env": "EXAMPLE_API_KEY", "max_tokens": 32,
+                "terminal_policy": "binary_at_own_threshold", "orders": ["Gate-Screen-Audit"]}},
+            "models": {"audit": {"api_key_env": "EXAMPLE_API_KEY", "max_tokens": 32,
                               "system_prompt": "Audit this trace.\n", "schema": {"type": "object"}}},
         }
 
@@ -42,23 +42,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["paths"]["results"], str(self.root / "results"))
         self.assertEqual(config["data"]["root"], str(self.root / "data"))
         self.assertFalse(config["experiments"]["configuration"]["resume"])
-        self.assertEqual(config["models"]["l3"]["system_prompt"], "Audit this trace.\n")
-        self.assertEqual(config["models"]["l3"]["schema"], {"type": "object"})
+        self.assertEqual(config["models"]["audit"]["system_prompt"], "Audit this trace.\n")
+        self.assertEqual(config["models"]["audit"]["schema"], {"type": "object"})
 
     def test_root_explicitly_overrides_workspace(self):
-        self.value["runtime"] = {"l3_python": "tools/python"}
+        self.value["runtime"] = {"audit_python": "tools/python"}
         self.value["models"]["encoder"] = {"checkpoint_path": "models/encoder"}
         config = self.load(root=self.root / "override")
         self.assertEqual(config["paths"]["workspace"], str(self.root / "override"))
-        self.assertEqual(config["runtime"]["l3_python"], str(self.root / "override/tools/python"))
+        self.assertEqual(config["runtime"]["audit_python"], str(self.root / "override/tools/python"))
         self.assertEqual(config["models"]["encoder"]["checkpoint_path"], str(self.root / "override/models/encoder"))
 
     def test_interpreter_symlink_retains_virtualenv_identity(self):
         executable = self.root / "venv/bin/python"
         executable.parent.mkdir(parents=True)
         executable.symlink_to(sys.executable)
-        self.value["runtime"] = {"l3_python": "venv/bin/python"}
-        self.assertEqual(self.load()["runtime"]["l3_python"], str(executable))
+        self.value["runtime"] = {"audit_python": "venv/bin/python"}
+        self.assertEqual(self.load()["runtime"]["audit_python"], str(executable))
 
     def test_invalid_yaml_and_duplicate_keys(self):
         for text in ("[", "[]", "null", "version: 1\nversion: 1\n", "version: 1\npaths:\n  results: x\n  results: y\n"):
@@ -87,11 +87,11 @@ class ConfigTests(unittest.TestCase):
             {"runtime": {"max_gpu_memory_mib": True}},
             {"training": {"seeds": []}}, {"training": {"seeds": [42, 42]}},
             {"training": {"seeds": [True]}},
-            {"training": {"calibration": {"l1_recall_floor": 1.1}}},
+            {"training": {"calibration": {"gate_recall_floor": 1.1}}},
             {"data": {"reference_test_sha256": "stale"}},
             {"data": {"judge": {"skip": "false"}}},
-            {"models": {"l3": {"max_tokens": "32"}}},
-            {"models": {"l3": {"temperature": float("nan")}}},
+            {"models": {"audit": {"max_tokens": "32"}}},
+            {"models": {"audit": {"temperature": float("nan")}}},
             {"backup": {"include_checkpoints": "false"}},
         ]
         for changes in cases:
@@ -101,10 +101,10 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     self.load(value)
 
-    def test_binary_terminal_policy_and_l3_last(self):
+    def test_binary_terminal_policy_and_audit_last(self):
         for settings in ({"terminal_policy": "Forward"},
-                         {"terminal_policy": "binary_at_own_threshold", "orders": ["L3-L1"]},
-                         {"terminal_policy": "binary_at_own_threshold", "orders": ["L1-L1"]},
+                         {"terminal_policy": "binary_at_own_threshold", "orders": ["Audit-Gate"]},
+                         {"terminal_policy": "binary_at_own_threshold", "orders": ["Gate-Gate"]},
                          {"terminal_policy": "binary_at_own_threshold", "resume": "false"}):
             with self.subTest(settings=settings):
                 value = copy.deepcopy(self.value)
@@ -119,14 +119,14 @@ class ConfigTests(unittest.TestCase):
         self.assertGreater(config["runtime"]["max_gpu_memory_mib"], 0)
 
     def test_benign_sweep_orders_and_legacy_single_order(self):
-        self.value['experiments']['benign'] = {'orders': ['L1-L2-L3', 'L2-L1-L3']}
-        self.assertEqual(self.load()['experiments']['benign']['orders'], ['L1-L2-L3', 'L2-L1-L3'])
-        self.value['experiments']['benign'] = {'order': 'L1-L2-L3'}
+        self.value['experiments']['benign'] = {'orders': ['Gate-Screen-Audit', 'Screen-Gate-Audit']}
+        self.assertEqual(self.load()['experiments']['benign']['orders'], ['Gate-Screen-Audit', 'Screen-Gate-Audit'])
+        self.value['experiments']['benign'] = {'order': 'Gate-Screen-Audit'}
         settings = self.load()['experiments']['benign']
-        self.assertEqual(settings['orders'], ['L1-L2-L3'])
+        self.assertEqual(settings['orders'], ['Gate-Screen-Audit'])
         self.assertNotIn('order', settings)
-        for invalid in ({}, {'orders': []}, {'orders': ['L3-L1']},
-                        {'orders': ['L1', 'L1']}, {'order': 'L1', 'orders': ['L1']}):
+        for invalid in ({}, {'orders': []}, {'orders': ['Audit-Gate']},
+                        {'orders': ['Gate', 'Gate']}, {'order': 'Gate', 'orders': ['Gate']}):
             self.value['experiments']['benign'] = invalid
             with self.subTest(settings=invalid), self.assertRaises(ConfigError):
                 self.load()
@@ -142,12 +142,12 @@ class ConfigTests(unittest.TestCase):
         for key, value in (("api_key", "literal-secret"), ("api_key_env", "${SECRET}"),
                            ("api_key_env", "not an env name")):
             config = copy.deepcopy(self.value)
-            config["models"]["l3"][key] = value
+            config["models"]["audit"][key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ConfigError):
                 self.load(config)
 
     def test_inline_content_hashes(self):
-        model = self.value["models"]["l3"]
+        model = self.value["models"]["audit"]
         model["system_prompt_sha256"] = hashlib.sha256(model["system_prompt"].encode()).hexdigest()
         model["schema_sha256"] = fingerprint(model["schema"])
         self.load()
@@ -157,12 +157,12 @@ class ConfigTests(unittest.TestCase):
 
     def test_inline_schema_credential_field_names_are_not_credentials(self):
         schema = {"type": "object", "properties": {"token": {"type": "string"}}}
-        self.value["models"]["l3"]["schema"] = schema
-        self.value["models"]["l3"]["schema_sha256"] = fingerprint(schema)
-        self.assertEqual(self.load()["models"]["l3"]["schema"], schema)
+        self.value["models"]["audit"]["schema"] = schema
+        self.value["models"]["audit"]["schema_sha256"] = fingerprint(schema)
+        self.assertEqual(self.load()["models"]["audit"]["schema"], schema)
 
     def test_recursive_alias_and_yaml_object_are_rejected(self):
-        for text in ("version: 1\nmodels: &a\n  l3: *a\n", "version: 1\nmodels:\n  l3: 2026-01-01\n"):
+        for text in ("version: 1\nmodels: &a\n  audit: *a\n", "version: 1\nmodels:\n  audit: 2026-01-01\n"):
             self.path.write_text(text, encoding="utf-8")
             with self.assertRaises(ConfigError):
                 load_config(self.path)
@@ -176,7 +176,7 @@ class ConfigTests(unittest.TestCase):
         second["backup"]["enabled"] = False
         self.assertEqual(experiment_signature(first, "configuration"),
                          experiment_signature(second, "configuration"))
-        second["experiments"]["configuration"]["orders"] = ["L1"]
+        second["experiments"]["configuration"]["orders"] = ["Gate"]
         self.assertNotEqual(experiment_signature(first, "configuration"),
                             experiment_signature(second, "configuration"))
         self.assertNotEqual(experiment_signature(first, "configuration", {"input": "a"}),

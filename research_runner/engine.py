@@ -11,7 +11,7 @@ import statistics
 from research_runner.artifacts import IncompatibleResultsError, read_json, read_jsonl, write_json, write_jsonl, file_sha256, fingerprint
 from research_runner.execution import ProcessExecutor
 from research_runner.payloads import request
-from research_runner.scoring import route, calibrate_l1, metrics, score_episodes
+from research_runner.scoring import route, calibrate_gate, metrics, score_episodes
 from research_runner.progress import Reporter, emit, iterable, scope
 
 NAMES = {0: 'dataset', 1: 'training', 2: 'configuration', 3: 'baselines',
@@ -45,13 +45,13 @@ def rebase_json(root, destination):
 
 
 def resolve_pending(decision, answer):
-    if not decision['pending_l3']:
-        raise ValueError('Cannot attach L3 to a prefix not escalated to L3')
-    decision.update(prediction=answer['prediction'], pending_l3=False, l3=answer)
-    decision['layer_scores']['L3'] = answer
-    if decision['route'][-1] != {'layer': 'L3', 'action': 'Pending'}:
-        raise ValueError('Pending L3 routing record is inconsistent')
-    decision['route'][-1] = {'layer': 'L3', 'action': 'Stop' if answer['prediction'] else 'Forward'}
+    if not decision['pending_audit']:
+        raise ValueError('Cannot attach Audit to a prefix not escalated to Audit')
+    decision.update(prediction=answer['prediction'], pending_audit=False, audit=answer)
+    decision['layer_scores']['Audit'] = answer
+    if decision['route'][-1] != {'layer': 'Audit', 'action': 'Pending'}:
+        raise ValueError('Pending Audit routing record is inconsistent')
+    decision['route'][-1] = {'layer': 'Audit', 'action': 'Stop' if answer['prediction'] else 'Forward'}
 
 
 class ResearchRunner:
@@ -68,7 +68,7 @@ class ResearchRunner:
         for key in ('resume', 'stage'):
             experiment.pop(key, None)
         models = self.config['models']
-        scientific = {'version': self.config['version'], 'experiment': experiment}
+        scientific = {'version': self.config['version'], 'naming': self.config['naming'], 'experiment': experiment}
         if name == 'dataset':
             scientific['data'] = self.config['data']
             raw = Path(self.config['data']['root']) / 'raw'
@@ -76,25 +76,24 @@ class ResearchRunner:
             scientific['outcome_inputs'] = {key: file_sha256(self.config['data'][key])
                 if self.config['data'].get(key) and Path(self.config['data'][key]).is_file() else None
                 for key in ('judges', 'reviews')}
-            from data.data_split import load_membership
+            from research_runner.implementation.data.data_split import load_membership
             scientific['membership'] = load_membership(Path(self.config['data']['root']), None)
         elif name == 'training':
             scientific.update(training=self.config['training'], encoder=models['encoder'], autoencoder=models['autoencoder'])
         else:
             scientific['seeds'] = self.config['training']['seeds']
             if name == 'configuration_stage1':
-                scientific.update(l2=models['l2'], calibration=self.config['training']['calibration'], payload=models['l3']['payload'])
+                scientific.update(screen=models['screen'], calibration=self.config['training']['calibration'], payload=models['audit']['payload'])
             elif name != 'baselines':
-                scientific.update(l3=models['l3'], timing=self.config['experiments']['timing'])
+                scientific.update(audit=models['audit'], timing=self.config['experiments']['timing'])
         runtime = self.config['runtime']
         if name in ('training', 'configuration_stage1'):
             scientific['runtime'] = {'python': runtime['python'], 'device': runtime['device']}
         elif name != 'dataset':
-            scientific['runtime'] = {'l3_python': runtime['l3_python'], 'device': runtime['device']}
+            scientific['runtime'] = {'audit_python': runtime['audit_python'], 'device': runtime['device']}
         sources = {}
         workspace = Path(self.config['paths']['workspace'])
-        for directory in ('research_runner', 'data', 'eval', 'training', 'models/detectors',
-                          'models/baseline', 'experiments/side_tests', 'config', 'utils'):
+        for directory in ('research_runner',):
             for parent, directories, files in os.walk(workspace / directory):
                 directories[:] = sorted(d for d in directories if d not in {'.venv', 'venv', 'env', '__pycache__', '.git'})
                 for name_ in sorted(files):
@@ -199,10 +198,10 @@ class ResearchRunner:
         stage = self.config['experiments']['configuration']['stage']
         result = None
         if stage in ('stage1', 'full'):
-            emit('configuration.stage1', message='L1/L2 scores and routing. L3 is not loaded.', force=True)
+            emit('configuration.stage1', message='Gate/Screen scores and routing. Audit is not loaded.', force=True)
             result = self.configuration_stage1(overwrite=overwrite)
         if stage in ('stage2', 'full'):
-            emit('configuration.stage2', message='Stage 1 process has exited; validating artifacts before starting L3.', force=True)
+            emit('configuration.stage2', message='Stage 1 process has exited; validating artifacts before starting Audit.', force=True)
             result = self.configuration_stage2(overwrite=overwrite)
         return result
 
@@ -216,23 +215,23 @@ class ResearchRunner:
                                       'validation': str(data / 'training/encoder/val.jsonl'),
                                       'checkpoints': read_json(training / 'checkpoints.json')}, out / 'scores')
             rows = self.rows()
-            l2 = index_scores(read_jsonl(out / 'scores/l2_scores.jsonl'), rows)
+            screen = index_scores(read_jsonl(out / 'scores/screen_scores.jsonl'), rows)
             for seed in iterable(self.config['training']['seeds'], 'stage1.seeds', unit='seeds'):
                 checkpoint = result['seeds'][str(seed)]['checkpoint']
-                l1 = index_scores(read_jsonl(out / f'scores/l1_scores_seed{seed}.jsonl'), rows)
+                gate = index_scores(read_jsonl(out / f'scores/gate_scores_seed{seed}.jsonl'), rows)
                 requests = []
                 for order in iterable(settings['orders'], f'stage1.seed_{seed}.routing', unit='configurations'):
-                    emit(f'stage1.seed_{seed}.{order}', message='Computing routing and saving pending L3 requests.', force=True)
-                    decisions = route(rows, l1, l2, order.split('-'), checkpoint['l1_threshold'], result['l2_calibration']['threshold'])
+                    emit(f'stage1.seed_{seed}.{order}', message='Computing routing and saving pending Audit requests.', force=True)
+                    decisions = route(rows, gate, screen, order.split('-'), checkpoint['gate_threshold'], result['screen_calibration']['threshold'])
                     write_jsonl(out / f'seed_{seed}/{order}/routing.jsonl', decisions)
-                    pending = {d['id'] for d in decisions if d['pending_l3']}
+                    pending = {d['id'] for d in decisions if d['pending_audit']}
                     for row in rows:
                         if row['id'] in pending:
-                            req = request(row, self.config['models']['l3']['payload'])
+                            req = request(row, self.config['models']['audit']['payload'])
                             requests.append({**req, 'configuration': order, 'seed': seed})
-                write_jsonl(out / f'seed_{seed}/l3_requests.jsonl', requests)
+                write_jsonl(out / f'seed_{seed}/audit_requests.jsonl', requests)
             write_json(out / 'stage_complete.json', {'stage': 1, 'score_worker_completed': True,
-                                                     'l2_threshold': result['l2_calibration']['threshold']})
+                                                     'screen_threshold': result['screen_calibration']['threshold']})
             rebase_json(out, Path(self.config['paths']['results']) / 'configuration_stage1')
         return self.prerequisite('configuration_stage1')
 
@@ -249,7 +248,7 @@ class ResearchRunner:
         deduplicate = self.config['experiments']['timing']['deduplicate_accuracy_requests'] and not measure
         selected = unique if deduplicate else requests
         submitted = [{**r, 'request_id': f'{i}:{r["request_id"]}'} for i, r in enumerate(selected)]
-        emit('l3.submission', 0, len(submitted), unit='requests',
+        emit('audit.submission', 0, len(submitted), unit='requests',
              message=f'{len(requests)} routed requests; {len(unique)} unique payloads. Output: {out}', force=True)
         write_jsonl(out / 'submitted_requests.jsonl', submitted)
         if submitted:
@@ -260,10 +259,10 @@ class ResearchRunner:
         expected = {r['request_id'] for r in submitted}
         got = {r['request_id'] for r in responses}
         if got != expected or len(got) != len(responses):
-            raise ValueError('L3 responses missing, duplicated or from another request set')
+            raise ValueError('Audit responses missing, duplicated or from another request set')
         if any(type(r.get('prediction')) is not int or r['prediction'] not in (0, 1) or r.get('error') for r in responses):
             write_jsonl(out / 'failed_responses.jsonl', responses)
-            raise ValueError('L3 inference failed or returned invalid verdicts; errors are not benign predictions.')
+            raise ValueError('Audit inference failed or returned invalid verdicts; errors are not benign predictions.')
         by_id = {r['request_id']: r for r in responses}
         aligned = []
         if not deduplicate:
@@ -272,11 +271,11 @@ class ResearchRunner:
             lookup = {r['request_id']: by_id[s['request_id']] for r, s in zip(unique, submitted)}
             aligned = [{**r, **lookup[r['request_id']], 'request_id': r['request_id']} for r in requests]
         write_jsonl(out / 'aligned_responses.jsonl', aligned)
-        emit('l3.submission', len(submitted), len(submitted), unit='requests',
+        emit('audit.submission', len(submitted), len(submitted), unit='requests',
              message='All response IDs validated and aligned.', status='completed', force=True)
         write_json(out / 'timing.json', {'uncached_measured': measure, 'submitted_requests': len(submitted),
                                         'accuracy_unique_payloads': len(unique), 'cache_used': False,
-                                        'interpretation': 'observed_L3_request_or_batch_time; staged_pipeline_is_component_estimate'})
+                                        'interpretation': 'observed_AUDIT_request_or_batch_time; staged_pipeline_is_component_estimate'})
         return aligned
 
     def report(self, out, rows, decisions, *, episode_level=True):
@@ -294,19 +293,19 @@ class ResearchRunner:
         report['samples'] = len(rows)
         report['sample_ids'] = [r['id'] for r in rows]
         traffic = {layer: sum(any(step.get('layer') == layer for step in d.get('route', [])) for d in decisions)
-                   for layer in ('L1', 'L2', 'L3')}
+                   for layer in ('Gate', 'Screen', 'Audit')}
         report['processed_counts'] = traffic
         report['processed_ratios'] = {key: value / len(rows) if rows else 0. for key, value in traffic.items()}
         components = {}
-        for layer in ('L1', 'L2', 'L3'):
+        for layer in ('Gate', 'Screen', 'Audit'):
             values = []
             for d in decisions:
-                if layer == 'L3' and d.get('channel_results'):
+                if layer == 'Audit' and d.get('channel_results'):
                     values.append(sum(float(a.get('seconds', 0.)) for a in d['channel_results']))
                     continue
-                record = d.get('l3', {}) if layer == 'L3' else d.get('layer_scores', {}).get(layer, {})
-                if layer == 'L3' and not record:
-                    record = d.get('layer_scores', {}).get('L3', {})
+                record = d.get('audit', {}) if layer == 'Audit' else d.get('layer_scores', {}).get(layer, {})
+                if layer == 'Audit' and not record:
+                    record = d.get('layer_scores', {}).get('Audit', {})
                 values.append(float(record.get('seconds', 0.)))
             components[layer] = sum(values)
         if any(d.get('detector_details') or d.get('channel_verdicts') for d in decisions):
@@ -323,7 +322,7 @@ class ResearchRunner:
         if episode_level:
             data = self.data_root()
             episodes = read_jsonl(data / 'splits/test.jsonl')
-            from eval.asr import load_judges
+            from research_runner.implementation.evaluation.asr import load_judges
             asr = score_episodes(episodes, decisions, load_judges(data / 'judges/prompt_success_judgements.jsonl'))
             write_json(out / 'asr.json', asr)
             write_jsonl(out / 'episode_results.jsonl', asr['episodes'])
@@ -357,9 +356,9 @@ class ResearchRunner:
             self.report(out / 'combined_or', rows, combined)
             self.report(out / 'no_defense', rows, [{**r, 'prediction': 0, 'route': []} for r in rows])
             for seed in iterable(self.config['training']['seeds'], 'baseline.ig', unit='seeds'):
-                source = full / f'seed_{seed}/L1-L2-L3/prefix_decisions.jsonl'
+                source = full / f'seed_{seed}/Gate-Screen-Audit/prefix_decisions.jsonl'
                 if not source.exists():
-                    raise ValueError('Experiment 2 must include L1-L2-L3 for IG baseline comparison.')
+                    raise ValueError('Experiment 2 must include Gate-Screen-Audit for IG baseline comparison.')
                 self.report(out / f'seed_{seed}/InteractionGuard', rows, read_jsonl(source))
             write_json(out / 'stage_complete.json', {'deterministic_baselines_accuracy_runs': 1,
                          'ig_training_trials': len(self.config['training']['seeds']),
@@ -379,17 +378,17 @@ class ResearchRunner:
                 conditions = [*settings['channels'], 'history']
                 for channel in iterable(conditions, f'channel_ablation.seed_{seed}.requests', unit='conditions'):
                     for row in rows:
-                        req = request(row, self.config['models']['l3']['payload'],
+                        req = request(row, self.config['models']['audit']['payload'],
                                       None if channel == 'history' else channel, settings['prompt_anchoring'])
                         requests.append({**req, 'condition': channel, 'seed': seed})
-                answers = self.infer(requests, out / f'seed_{seed}/l3')
+                answers = self.infer(requests, out / f'seed_{seed}/audit')
                 lookup = {(r['condition'], r['prefix_id']): r for r in answers}
                 for channel in iterable(conditions + ['channel_or'], f'channel_ablation.seed_{seed}.reports', unit='conditions'):
                     decisions = []
                     for row in rows:
                         used = [lookup[(c, row['id'])] for c in settings['channels']] if channel == 'channel_or' else [lookup[(channel, row['id'])]]
                         decisions.append({**row, 'prediction': int(any(a['prediction'] for a in used)),
-                                          'channel_results': used, 'route': [{'layer': 'L3', 'action': 'Audit'}]})
+                                          'channel_results': used, 'route': [{'layer': 'Audit', 'action': 'Audit'}]})
                     self.report(out / f'seed_{seed}/{channel}', rows, decisions)
                 cases = []
                 for row in rows:
@@ -411,15 +410,15 @@ class ResearchRunner:
                 return out
             rows = self.rows()
             for seed in iterable(self.config['training']['seeds'], 'backend.seeds', unit='seeds'):
-                requests = [r for r in read_jsonl(first / f'seed_{seed}/l3_requests.jsonl') if r['configuration'] == settings['order']]
+                requests = [r for r in read_jsonl(first / f'seed_{seed}/audit_requests.jsonl') if r['configuration'] == settings['order']]
                 expected = fingerprint([(r['prefix_id'], r['request_id']) for r in requests])
                 for candidate in iterable(settings['candidates'], f'backend.seed_{seed}', unit='backends'):
                     emit(f'backend.seed_{seed}.{candidate["name"]}', message=f'{len(requests)} pending requests; upstream routing fixed.', force=True)
-                    answers = self.infer(requests, out / f'seed_{seed}/{candidate["name"]}/l3', candidate)
+                    answers = self.infer(requests, out / f'seed_{seed}/{candidate["name"]}/audit', candidate)
                     lookup = {r['prefix_id']: r for r in answers}
                     decisions = read_jsonl(first / f'seed_{seed}/{settings["order"]}/routing.jsonl')
                     for d in decisions:
-                        if d['pending_l3']:
+                        if d['pending_audit']:
                             answer = lookup[d['id']]
                             resolve_pending(d, answer)
                     directory = out / f'seed_{seed}/{candidate["name"]}'
@@ -438,30 +437,30 @@ class ResearchRunner:
                 return out
             rows = self.rows()
             validation = read_jsonl(self.data_root() / 'training/encoder/val.jsonl')
-            l2 = index_scores(read_jsonl(first / 'scores/l2_scores.jsonl'), rows)
-            l2_threshold = read_json(first / 'scores/l2_calibration.json')['threshold']
+            screen = index_scores(read_jsonl(first / 'scores/screen_scores.jsonl'), rows)
+            screen_threshold = read_json(first / 'scores/screen_calibration.json')['threshold']
             for seed in iterable(self.config['training']['seeds'], 'threshold.seeds', unit='seeds'):
-                l1 = index_scores(read_jsonl(first / f'scores/l1_scores_seed{seed}.jsonl'), rows)
-                val = index_scores(read_jsonl(first / f'scores/l1_validation_seed{seed}.jsonl'), validation)
-                gates = [(f'recall_{floor}', calibrate_l1([r['label'] for r in validation],
+                gate = index_scores(read_jsonl(first / f'scores/gate_scores_seed{seed}.jsonl'), rows)
+                val = index_scores(read_jsonl(first / f'scores/gate_validation_seed{seed}.jsonl'), validation)
+                gates = [(f'recall_{floor}', calibrate_gate([r['label'] for r in validation],
                          [val[r['id']]['score'] for r in validation], floor)) for floor in settings['recall_floors']]
                 if settings['include_validation_max_f1']:
-                    gates.insert(0, ('validation_max_f1', calibrate_l1([r['label'] for r in validation],
+                    gates.insert(0, ('validation_max_f1', calibrate_gate([r['label'] for r in validation],
                                    [val[r['id']]['score'] for r in validation], 0.)))
                 for name, calibration in iterable(gates, f'threshold.seed_{seed}', unit='operating points'):
-                    emit(f'threshold.seed_{seed}.{name}', message=f"L1 threshold={calibration['threshold']}; other settings fixed.", force=True)
-                    decisions = route(rows, l1, l2, settings['order'].split('-'), calibration['threshold'], l2_threshold)
-                    pending = {d['id'] for d in decisions if d['pending_l3']}
-                    requests = [request(r, self.config['models']['l3']['payload']) for r in rows if r['id'] in pending]
+                    emit(f'threshold.seed_{seed}.{name}', message=f"Gate threshold={calibration['threshold']}; other settings fixed.", force=True)
+                    decisions = route(rows, gate, screen, settings['order'].split('-'), calibration['threshold'], screen_threshold)
+                    pending = {d['id'] for d in decisions if d['pending_audit']}
+                    requests = [request(r, self.config['models']['audit']['payload']) for r in rows if r['id'] in pending]
                     directory = out / f'seed_{seed}/{name}'
-                    lookup = {a['prefix_id']: a for a in self.infer(requests, directory / 'l3')}
+                    lookup = {a['prefix_id']: a for a in self.infer(requests, directory / 'audit')}
                     for d in decisions:
-                        if d['pending_l3']:
+                        if d['pending_audit']:
                             resolve_pending(d, lookup[d['id']])
                     self.report(directory, rows, decisions)
-                    write_json(directory / 'operating_point.json', {'l1': calibration, 'l2_threshold': l2_threshold,
+                    write_json(directory / 'operating_point.json', {'gate': calibration, 'screen_threshold': screen_threshold,
                                'selection_source': 'validation_only', 'other_models_and_policies_fixed': True})
-            write_json(out / 'stage_complete.json', {'variable': 'validation-derived L1 threshold'})
+            write_json(out / 'stage_complete.json', {'variable': 'validation-derived Gate threshold'})
             self.aggregate(out)
         return self.prerequisite('threshold')
 
@@ -478,10 +477,10 @@ class ResearchRunner:
             if (out / 'stage_complete.json').exists():
                 return out
             all_rows = self.rows()
-            l2 = index_scores(read_jsonl(first / 'scores/l2_scores.jsonl'), all_rows)
-            l2_threshold = read_json(first / 'scores/l2_calibration.json')['threshold']
+            screen = index_scores(read_jsonl(first / 'scores/screen_scores.jsonl'), all_rows)
+            screen_threshold = read_json(first / 'scores/screen_calibration.json')['threshold']
             for trial, seed in enumerate(iterable(self.config['training']['seeds'], 'benign.seeds', unit='seeds')):
-                l1 = index_scores(read_jsonl(first / f'scores/l1_scores_seed{seed}.jsonl'), all_rows)
+                gate = index_scores(read_jsonl(first / f'scores/gate_scores_seed{seed}.jsonl'), all_rows)
                 for ratio in iterable(settings['ratios'], f'benign.seed_{seed}', unit='ratios'):
                     emit(f'benign.seed_{seed}.{ratio}', message=f'Benign ratio={ratio:.0%}; thresholds fixed.', force=True)
                     rng = random.Random(settings['sampling_seed'] + trial * 10000 + round(ratio * 100))
@@ -510,23 +509,23 @@ class ResearchRunner:
                     directory = out / f'seed_{seed}/benign_{round(ratio*100)}'
                     workload = {'requested_benign_ratio': ratio, 'actual_benign_ratio': n_benign/n,
                            'sample_ids': [r['id'] for r in rows], 'sampling_seed': settings['sampling_seed'] + trial*10000 + round(ratio*100),
-                           'l1_threshold': checkpoints[str(seed)]['l1_threshold'], 'l2_threshold': l2_threshold,
+                           'gate_threshold': checkpoints[str(seed)]['gate_threshold'], 'screen_threshold': screen_threshold,
                            'profile': 'main', 'sampling_unit': 'prefix_without_replacement_stratified_attack_categories',
                            'asr_note': 'Partial-prefix workload does not support whole-episode ASR/false-blocking; use Experiment 3.'}
                     workload['paired_workload_sha256'] = fingerprint(workload)
                     write_json(directory / 'workload.json', workload)
                     for order in iterable(orders, f'benign.seed_{seed}.{ratio}.orders', unit='configurations'):
                         emit(f'benign.seed_{seed}.{ratio}.{order}', message='Same sampled workload; no threshold retuning.', force=True)
-                        decisions = route(rows, l1, l2, order.split('-'), checkpoints[str(seed)]['l1_threshold'], l2_threshold)
-                        pending = {d['id'] for d in decisions if d['pending_l3']}
-                        requests = [request(r, self.config['models']['l3']['payload']) for r in rows if r['id'] in pending]
+                        decisions = route(rows, gate, screen, order.split('-'), checkpoints[str(seed)]['gate_threshold'], screen_threshold)
+                        pending = {d['id'] for d in decisions if d['pending_audit']}
+                        requests = [request(r, self.config['models']['audit']['payload']) for r in rows if r['id'] in pending]
                         condition = directory / order
-                        lookup = {a['prefix_id']: a for a in self.infer(requests, condition / 'l3')}
+                        lookup = {a['prefix_id']: a for a in self.infer(requests, condition / 'audit')}
                         for d in decisions:
-                            if d['pending_l3']:
+                            if d['pending_audit']:
                                 resolve_pending(d, lookup[d['id']])
                         self.report(condition, rows, decisions, episode_level=False)
-                        benign_front_pass = sum(r['label'] == 0 and d['route'][0] == {'layer': 'L1', 'action': 'Forward'}
+                        benign_front_pass = sum(r['label'] == 0 and d['route'][0] == {'layer': 'Gate', 'action': 'Forward'}
                                                 for r, d in zip(rows, decisions))
                         write_json(condition / 'workload.json', {**workload, 'configuration': order,
                                    'benign_front_gate_forward_count': benign_front_pass,
@@ -544,13 +543,13 @@ class ResearchRunner:
                 return out
             rows = self.rows()
             for seed in iterable(self.config['training']['seeds'], 'stage2.seeds', unit='seeds'):
-                requests = read_jsonl(first / f'seed_{seed}/l3_requests.jsonl')
-                answers = self.infer(requests, out / f'seed_{seed}/l3')
+                requests = read_jsonl(first / f'seed_{seed}/audit_requests.jsonl')
+                answers = self.infer(requests, out / f'seed_{seed}/audit')
                 lookup = {(a['configuration'], a['prefix_id']): a for a in answers}
                 for order in iterable(settings['orders'], f'stage2.seed_{seed}.reports', unit='configurations'):
                     decisions = read_jsonl(first / f'seed_{seed}/{order}/routing.jsonl')
                     for d in decisions:
-                        if d['pending_l3']:
+                        if d['pending_audit']:
                             a = lookup[(order, d['id'])]
                             resolve_pending(d, a)
                     self.report(out / f'seed_{seed}/{order}', rows, decisions)
@@ -572,7 +571,7 @@ class ResearchRunner:
                                           for key in ('precision', 'recall', 'f1', 'fpr', 'fnr', 'estimated_pipeline_seconds_per_sample')},
                               'traffic': {layer: {'mean': statistics.mean(v['processed_ratios'][layer] for v in values),
                                                   'std': statistics.stdev(v['processed_ratios'][layer] for v in values) if len(values) > 1 else 0.}
-                                          for layer in ('L1', 'L2', 'L3')}}
+                                          for layer in ('Gate', 'Screen', 'Audit')}}
         write_json(Path(out) / 'summary.json', summary)
         if self.config['experiments']['timing'].get('generate_figures', True):
             from research_runner.plots import render

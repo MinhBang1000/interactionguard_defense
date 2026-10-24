@@ -8,7 +8,7 @@ from research_runner.progress import emit, iterable, scope
 
 def execute(operation, config, job, output, backend=None):
     from research_runner.artifacts import read_jsonl, write_json, write_jsonl
-    from research_runner.scoring import calibrate_l2
+    from research_runner.scoring import calibrate_screen
     if backend is None:
         from research_runner.adapters import RealBackend
         backend = RealBackend(config)
@@ -19,27 +19,27 @@ def execute(operation, config, job, output, backend=None):
     if operation == 'train':
         result = backend.train(job['seed'], output / 'model')
     elif operation == 'score':
-        emit('score.l2.test', message=f'{len(rows)} test prefixes.', force=True)
-        l2 = backend.score_detector(rows, config['models']['l2'])
+        emit('score.screen.test', message=f'{len(rows)} test prefixes.', force=True)
+        screen = backend.score_detector(rows, config['models']['screen'])
         validation = read_jsonl(job['validation'])
-        emit('score.l2.validation', message=f'{len(validation)} validation prefixes; then threshold calibration.', force=True)
-        val_scores = backend.score_detector(validation, config['models']['l2'])
-        calibration = calibrate_l2([r['label'] for r in validation], [r['score'] for r in val_scores],
-                                   config['training']['calibration']['l2_fpr_budget'])
-        write_jsonl(output / 'l2_scores.jsonl', l2)
-        write_jsonl(output / 'l2_validation_scores.jsonl', val_scores)
-        write_json(output / 'l2_calibration.json', calibration)
+        emit('score.screen.validation', message=f'{len(validation)} validation prefixes; then threshold calibration.', force=True)
+        val_scores = backend.score_detector(validation, config['models']['screen'])
+        calibration = calibrate_screen([r['label'] for r in validation], [r['score'] for r in val_scores],
+                                   config['training']['calibration']['screen_fpr_budget'])
+        write_jsonl(output / 'screen_scores.jsonl', screen)
+        write_jsonl(output / 'screen_validation_scores.jsonl', val_scores)
+        write_json(output / 'screen_calibration.json', calibration)
         checkpoints = job['checkpoints']
-        result = {'l2_calibration': calibration, 'seeds': {}}
-        for seed, checkpoint in iterable(checkpoints.items(), 'score.l1.seeds', unit='seeds'):
-            emit(f'score.l1.seed_{seed}', message='Scoring test and validation prefixes.', force=True)
-            scores = backend.score_l1(rows, checkpoint)
-            write_jsonl(output / f'l1_scores_seed{seed}.jsonl', scores)
-            write_jsonl(output / f'l1_validation_seed{seed}.jsonl', backend.score_l1(validation, checkpoint))
-            result['seeds'][seed] = {'checkpoint': checkpoint, 'scores_file': f'l1_scores_seed{seed}.jsonl'}
+        result = {'screen_calibration': calibration, 'seeds': {}}
+        for seed, checkpoint in iterable(checkpoints.items(), 'score.gate.seeds', unit='seeds'):
+            emit(f'score.gate.seed_{seed}', message='Scoring test and validation prefixes.', force=True)
+            scores = backend.score_gate(rows, checkpoint)
+            write_jsonl(output / f'gate_scores_seed{seed}.jsonl', scores)
+            write_jsonl(output / f'gate_validation_seed{seed}.jsonl', backend.score_gate(validation, checkpoint))
+            result['seeds'][seed] = {'checkpoint': checkpoint, 'scores_file': f'gate_scores_seed{seed}.jsonl'}
     elif operation == 'infer':
         requests = read_jsonl(job['requests'])
-        responses = backend.infer_l3(requests, job.get('backend'))
+        responses = backend.infer_audit(requests, job.get('backend'))
         write_jsonl(output / 'responses.jsonl', responses)
         result = {'requests': len(requests), 'responses': len(responses)}
     elif operation == 'baseline':
@@ -51,7 +51,7 @@ def execute(operation, config, job, output, backend=None):
             emit(f'baseline.{name}', message=f'Channel={channel}; scoring test and validation, then calibration.', force=True)
             values = backend.score_detector(rows, settings[name], channels=[channel])
             val = backend.score_detector(validation, settings[name], channels=[channel])
-            calibration = calibrate_l2([r['label'] for r in validation], [r['score'] for r in val], settings['fpr_budget'])
+            calibration = calibrate_screen([r['label'] for r in validation], [r['score'] for r in val], settings['fpr_budget'])
             write_jsonl(output / f'{name}_scores.jsonl', values)
             write_jsonl(output / f'{name}_validation.jsonl', val)
             result[name] = calibration

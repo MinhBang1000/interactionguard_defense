@@ -8,7 +8,7 @@ cache inputs, and data.reference_test_sha256 optionally pins the processed test
 JSONL. Existing split membership is required; it is never regenerated.
 
 Judging defaults to skipped. Only an explicit data.judge.skip=False, pending
-episodes, runtime.l3_python (or runtime.python), and paths.workspace permit a
+episodes, runtime.audit_python (or runtime.python), and paths.workspace permit a
 judge subprocess. This module never imports model or training implementations.
 Pending vLLM judging requires a GPU; runtime.device and max_gpu_memory_mib are
 forwarded as IG_JUDGE_GPU and IG_JUDGE_MAX_MEMORY_MIB (defaults 0 and 1024).
@@ -24,14 +24,14 @@ import shutil
 import subprocess
 import tempfile
 
-from data.annotate_raw import annotate_sources
-from data.data_preprocess import (
+from research_runner.implementation.data.annotate_raw import annotate_sources
+from research_runner.implementation.data.data_preprocess import (
     main as preprocess, normalize_trace, read_jsonl, sha256, write_json, write_jsonl,
 )
-from data.data_split import SOURCES, SPLITS, load_membership, main as split
-from data.prepare_training import prepare
-from eval.asr import episode_hash, evaluate_files, load_judges
-from eval.prompt_success_judge import MODEL, apply_reviews, reusable_record
+from research_runner.implementation.data.data_split import SOURCES, SPLITS, load_membership, main as split
+from research_runner.implementation.data.prepare_training import prepare
+from research_runner.implementation.evaluation.asr import episode_hash, evaluate_files, load_judges
+from research_runner.implementation.evaluation.prompt_success_judge import MODEL, apply_reviews, reusable_record
 
 from .progress import emit, iterable, logged_process
 
@@ -111,9 +111,9 @@ def _judge(config, samples, judge_path, review_path, temporary):
             if type(memory) is not int or memory < 1:
                 raise ValueError("runtime.max_gpu_memory_mib must be a positive integer")
             environment.update(IG_JUDGE_GPU=device, IG_JUDGE_MAX_MEMORY_MIB=str(memory))
-        interpreter = runtime.get("l3_python") or runtime.get("python")
+        interpreter = runtime.get("audit_python") or runtime.get("python")
         if not interpreter:
-            raise ValueError("Judging requires explicit runtime.l3_python or runtime.python")
+            raise ValueError("Judging requires explicit runtime.audit_python or runtime.python")
         # Resolving venv/bin/python to its target would select the wrong environment.
         interpreter = _absolute(interpreter, "runtime judge interpreter", preserve_symlinks=True)
         workspace = config.get("paths", {}).get("workspace")
@@ -127,7 +127,7 @@ def _judge(config, samples, judge_path, review_path, temporary):
         reviews = temporary / "pending/reviews.jsonl"
         write_jsonl(traces, pending)
         write_jsonl(reviews, [])
-        command = [str(interpreter), "-m", "eval.prompt_success_judge",
+        command = [str(interpreter), "-m", "research_runner.implementation.evaluation.prompt_success_judge",
                    "--traces", str(traces), "--output", str(judge_path),
                    "--reviews", str(reviews), "--backend", backend,
                    "--base-url", options.get("base_url") or "http://127.0.0.1:11434/v1"]

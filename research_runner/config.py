@@ -26,14 +26,16 @@ class ConfigError(ValueError):
 
 DEFAULT_CONFIG = {
     "version": 1,
+    "naming": {"version": 2, "legacy": {"L1": "Gate", "L2": "Screen", "L3": "Audit"},
+               "paper": {"Screen": "L1", "Gate": "L2", "Audit": "L3"}},
     "paths": {"workspace": ".", "results": "results/research_runner", "backup": "backup"},
     "data": {"root": "data", "judges": None, "reviews": None,
              "reference_test_sha256": None,
              "judge": {"backend": "vllm", "base_url": None, "skip": False}},
-    "runtime": {"python": sys.executable, "l3_python": sys.executable,
+    "runtime": {"python": sys.executable, "audit_python": sys.executable,
                 "device": "cpu", "max_gpu_memory_mib": 1024, "gpu_wait_seconds": 60},
-    "training": {"seeds": [42], "calibration": {"l1_recall_floor": 0.999,
-                                                "l2_fpr_budget": 0.01,
+    "training": {"seeds": [42], "calibration": {"gate_recall_floor": 0.999,
+                                                "screen_fpr_budget": 0.01,
                                                 "ae_selection_recall_floor": 0.98},
                  "excluded_attack_types": ["correlated"]},
     "models": {},
@@ -150,7 +152,7 @@ def _settings(value: Any, label: str) -> None:
                    "deduplicate_accuracy_requests", "measure_uncached"}:
             if type(item) is not bool:
                 raise ConfigError(f"{child} must be a boolean")
-        elif key in {"threshold", "threshold_reference", "l1_recall_floor", "l2_fpr_budget",
+        elif key in {"threshold", "threshold_reference", "gate_recall_floor", "screen_fpr_budget",
                      "ae_selection_recall_floor", "gpu_memory_utilization", "fpr_budget",
                      "dropout", "train_ratio", "warmup_ratio", "scheduler_factor"}:
             _number(item, child, 0, 1)
@@ -188,10 +190,10 @@ def _settings(value: Any, label: str) -> None:
                 if not isinstance(order, str):
                     raise ConfigError(f"{child} entries must be hyphen-separated layer names")
                 layers = order.split("-")
-                if not layers or len(layers) != len(set(layers)) or not set(layers) <= {"L1", "L2", "L3"}:
+                if not layers or len(layers) != len(set(layers)) or not set(layers) <= {"Gate", "Screen", "Audit"}:
                     raise ConfigError(f"Invalid layer order: {order}")
-                if "L3" in layers and layers[-1] != "L3":
-                    raise ConfigError(f"L3 must be terminal: {order}")
+                if "Audit" in layers and layers[-1] != "Audit":
+                    raise ConfigError(f"Audit must be terminal: {order}")
             if len(item) != len(set(item)):
                 raise ConfigError(f"{child} contains duplicates")
         elif isinstance(item, dict):
@@ -248,9 +250,11 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
         if section in supplied:
             _keys(supplied[section], set(DEFAULT_CONFIG[section]), section)
     config = _merge(DEFAULT_CONFIG, supplied)
+    if config['naming'] != DEFAULT_CONFIG['naming']:
+        raise ConfigError('naming must use version 2 with the fixed legacy and paper mappings')
     _keys(config["data"]["judge"], {"backend", "base_url", "skip", "api_key_env"}, "data.judge")
-    _keys(config["training"]["calibration"], {"l1_recall_floor", "l2_fpr_budget", "ae_selection_recall_floor"}, "training.calibration")
-    _keys(config["models"], {"encoder", "autoencoder", "l2", "l3"}, "models")
+    _keys(config["training"]["calibration"], {"gate_recall_floor", "screen_fpr_budget", "ae_selection_recall_floor"}, "training.calibration")
+    _keys(config["models"], {"encoder", "autoencoder", "screen", "audit"}, "models")
     _keys(config["experiments"], _EXPERIMENTS, "experiments")
     for name, settings in config["experiments"].items():
         _settings(settings, f"experiments.{name}")
@@ -332,7 +336,7 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
             _text(config["data"][key], "data.root")
         if config["data"][key] is not None:
             config["data"][key] = _path(config["data"][key], workspace, f"data.{key}")
-    for key in ("python", "l3_python"):
+    for key in ("python", "audit_python"):
         command = config["runtime"][key]
         _text(command, f"runtime.{key}")
         if "/" in command or command.startswith("."):

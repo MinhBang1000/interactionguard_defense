@@ -24,7 +24,7 @@ class ArtifactTests(unittest.TestCase):
                        "paths": {"workspace": str(self.root), "results": str(self.root / "results"),
                                  "backup": str(self.root / "backup")},
                        "backup": {"include_checkpoints": False},
-                       "models": {"l3": {"api_key_env": "EXAMPLE_API_KEY"}}}
+                       "models": {"audit": {"api_key_env": "EXAMPLE_API_KEY"}}}
         self.store = ArtifactStore(self.root / "results", self.config)
 
     def create(self, name="configuration_stage1", value=1, signature="signature"):
@@ -257,7 +257,7 @@ class ArtifactTests(unittest.TestCase):
             archive.writestr("old", "old")
         with zipfile.ZipFile(results / "disguised.data", "w") as archive:
             archive.writestr("old", "old")
-        self.config["models"]["l3"]["api_key"] = "never archive this literal"
+        self.config["models"]["audit"]["api_key"] = "never archive this literal"
         backup = self.store.backup()
         second = self.store.backup()
         self.assertNotEqual(backup, second)
@@ -270,7 +270,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertFalse(any("MUST-NOT-BE-IN-BACKUP" in archive.read(name).decode("utf-8") for name in names))
             self.assertFalse(any(name.endswith(".zip") or "linked" in name or name.startswith("/") or ".." in name.split("/") for name in names))
             self.assertNotIn("results/disguised.data", names)
-            self.assertNotIn("api_key", json.loads(archive.read("effective_config.json"))["models"]["l3"])
+            self.assertNotIn("api_key", json.loads(archive.read("effective_config.json"))["models"]["audit"])
             checksums = json.loads(archive.read("checksums.json"))["files"]
             self.assertEqual(set(checksums), set(names) - {"checksums.json"})
             for name, expected in checksums.items():

@@ -1,5 +1,54 @@
 # InteractionGuard
 
+## Functional Names (Naming Version 2)
+
+The research runner uses stable component identities, independent of order:
+
+| Runtime name | Mechanism | Legacy artifact name | Paper label |
+| --- | --- | --- | --- |
+| Screen | Frozen Deepset known-pattern classifier | L2 | L1 |
+| Gate | ModernBERT + AutoEncoder anomaly routing | L1 | L2 |
+| Audit | LLM semantic auditor | L3 | L3 |
+
+For example, legacy `L2-L1-L3` is `Screen-Gate-Audit`. Only labels change:
+models, scores, thresholds, routing and verdicts retain their original meaning.
+The fixed mapping is snapshotted from `config/experiments.yaml` (`naming`).
+`research_runner.naming.paper_order` translates labels for paper exports.
+
+Runner-owned preprocessing, ASR, training and detector implementations live in
+`research_runner/implementation/`. They do not import the old project modules.
+Historical side tests and legacy sources keep their original names and contents.
+The existing Audit Python environment path is an environment reference, not a
+component label; its legacy directory name is intentionally unchanged.
+
+The one-way migration utility is `tools/migrate_runner_naming.py`. Use
+`python tools/migrate_runner_naming.py --help` for its dry-run/apply interface.
+It requires a verified pre-migration inventory/backup (`before.json`); it will
+not infer a missing backup. Real migration provenance is stored in
+`results/research_runner/.naming_migration.json`, with a second copy in the backup.
+Do not run experiments or edit runner sources while migrating. On the current
+installation the migration is already complete; do not rerun completed experiments
+just because their component names changed. To inspect/check an existing migration:
+
+```bash
+python tools/migrate_runner_naming.py artifacts --backup backup/naming_v2_20261024T204153
+```
+
+On an unmigrated installation this is a dry-run; add `--apply` only after checking
+the backup and plan. On an already migrated installation it validates compatibility
+and returns `already_version_2`, without applying names twice.
+
+Original source hashes and frozen policy identities remain historical evidence,
+not claims that models were retrained with renamed source files. Frozen Audit
+input strings, including the historical clipping marker, remain byte-identical.
+
+Artifacts are staged and checked before publication. Publication renames the old
+result root to a `.naming-v1-recovery-*` sibling first, then installs the verified
+new root. On a publication exception it restores the old root. After interruption,
+retain both directories and the backup; never run experiments against a missing
+or partial root. Recovery is by restoring the complete old directory (and its
+matching code/config snapshot), not merging files across naming versions.
+
 Config-driven offline evaluation of a three-layer defense over stored LLM-agent
 interaction traces. The runner does not intervene in a live agent loop.
 
@@ -11,19 +60,19 @@ python main.py
 ```
 
 Edit **`config/experiments.yaml`** before running. This is the sole configuration
-source for the new runner, including the exact saved L3 system prompt and schema.
+source for the new runner, including the exact saved Audit system prompt and schema.
 There are no parameter questions while an experiment runs. Existing output
 requires an explicit overwrite confirmation (default: No).
 
 | Item | Operation | Required completed artifacts |
 | --- | --- | --- |
 | 0 | Full Dataset Preparation | Original raw traces, preserved split membership, judge cache/reviews |
-| 1 | Train and Calibrate Encoder + Layer 1 | 0 |
+| 1 | Train and Calibrate Encoder + Gate | 0 |
 | 2 | Layer Configuration Comparison | 0, 1; Stage 2 also requires compatible Stage 1 |
-| 3 | Channel-Specific Baseline and ASR Comparison | 0, completed 2 including L1-L2-L3 |
-| 4 | Same-L3 Channel vs Full-History Comparison | 0 |
-| 5 | Layer 3 Backend Comparison | Stage 1 of 2; configured order must exist there |
-| 6 | Layer 1 Threshold Sweep | Stage 1 of 2 |
+| 3 | Channel-Specific Baseline and ASR Comparison | 0, completed 2 including Gate-Screen-Audit |
+| 4 | Same-Audit Channel vs Full-History Comparison | 0 |
+| 5 | Audit Backend Comparison | Stage 1 of 2; configured order must exist there |
+| 6 | Gate Threshold Sweep | Stage 1 of 2 |
 | 7 | Benign-Ratio Sweep | Stage 1 of 2 |
 | 8 | Backup Snapshot | Existing results/config; checkpoints optional |
 | Q | Exit | None |
@@ -35,7 +84,7 @@ Noninteractive item selection is also available:
 
 ## Environment and Models
 
-Set `runtime.python`, `runtime.l3_python` and the physical GPU index in YAML.
+Set `runtime.python`, `runtime.audit_python` and the physical GPU index in YAML.
 The ML and vLLM environments are separate. The supplied paths reflect the
 reference server; change paths when moving machines. Required installed packages
 include PyYAML, NumPy, PyTorch, Transformers, datasets, scikit-learn,
@@ -45,14 +94,14 @@ Matplotlib is optional for PNG figures; JSON/CSV reports are always produced.
 Model snapshots must already be cached at the configured immutable revisions.
 The runner uses local-only/offline HF loading: it does not silently download
 weights. A missing model is an error, not a fallback to another checkpoint.
-OpenAI-compatible L3 backends can be configured explicitly with
+OpenAI-compatible Audit backends can be configured explicitly with
 `backend: openai-compatible`, `base_url` and `api_key_env`; credentials come from
 the environment, not YAML or saved artifacts.
 
 The default profile retains ModernBERT-base (8192-token CLS embeddings), a
 benign-trained AE, frozen `deepset/deberta-v3-base-injection` with JSON-decoded
 512-token/64-overlap windows (mean within payload, max across payloads), and the
-saved Llama 3.1 8B authorization-audit prompt/schema. L3 ORs its five attack flags
+saved Llama 3.1 8B authorization-audit prompt/schema. Audit ORs its five attack flags
 and requires confidence >= 0.5. Exact payload clipping remains 1800 prompt
 characters, 1200 characters/block, first two blocks/channel. Context capacity
 does not mean every original trace is passed in full.
@@ -83,7 +132,7 @@ describe the published files' SHA-256, byte sizes and JSONL row counts, while
 the outer artifact manifest additionally covers the reports/effective config.
 Missing prompt-success judgments may invoke the configured Llama judge during a
 real Item 0 run. `data.judge.skip: true` disables those calls; missing evidence
-then remains UNKNOWN. The success judge is distinct from the L3 defense.
+then remains UNKNOWN. The success judge is distinct from the Audit defense.
 
 The default reference test SHA-256 is
 `699acf0f601c1ed458d68a917aee175ce8a2688e8fc4486584bf34daf0ff3ed9`.
@@ -101,31 +150,31 @@ Correlated is held out from project adaptation/calibration. This is not a
 leave-one-family-out evaluation or proof of upstream pretraining independence.
 
 AE model selection follows the reference validation recipe (recall floor 0.98).
-The deployment L1 gate is recalibrated separately for each seed at recall >=
-0.999 using the recorded validation-F1 constrained objective. L2 has one
+The deployment Gate gate is recalibrated separately for each seed at recall >=
+0.999 using the recorded validation-F1 constrained objective. Screen has one
 validation-calibrated threshold under empirical FPR <= 0.01, shared across seeds.
 Threshold ties are not split. Test labels are not used for selection.
 
 | Layer | Nonterminal behavior | Terminal behavior |
 | --- | --- | --- |
-| L1 | error > threshold: Check; otherwise Forward | error > threshold: Stop; otherwise Forward |
-| L2 | probability > threshold: Stop; otherwise Check | probability > threshold: Stop; otherwise Forward |
-| L3 | Only evaluated as terminal auditor | Saved flag/confidence decision |
+| Gate | error > threshold: Check; otherwise Forward | error > threshold: Stop; otherwise Forward |
+| Screen | probability > threshold: Stop; otherwise Check | probability > threshold: Stop; otherwise Forward |
+| Audit | Only evaluated as terminal auditor | Saved flag/confidence decision |
 
-Thus L1-L2 blocks their positive intersection; L2-L1 blocks their positive union.
-Full L1-L2-L3 keeps L1 as screening only. There is no global terminal
+Thus Gate-Screen blocks their positive intersection; Screen-Gate blocks their positive union.
+Full Gate-Screen-Audit keeps Gate as screening only. There is no global terminal
 `Check -> Forward` rule.
 
 ## Two-Stage Configuration Comparison
 
 Set `experiments.configuration.stage` to `stage1`, `stage2`, or `full`.
-Stage 1 saves all L1/L2 scores, per-seed/per-order routing and exact L3 requests.
+Stage 1 saves all Gate/Screen scores, per-seed/per-order routing and exact Audit requests.
 Its subprocess exits before Stage 2 starts; CUDA contexts are not retained in
 the menu process. GPU preflight waits only for the configured interval and
 never terminates another user's jobs. A busy GPU stops the run.
 
-Stage 2 verifies Stage 1 artifacts, performs L3 inference and joins by IDs.
-Standalone L3 receives the whole test set. Backend comparison reuses the same
+Stage 2 verifies Stage 1 artifacts, performs Audit inference and joins by IDs.
+Standalone Audit receives the whole test set. Backend comparison reuses the same
 pending sets in Stage 1 for every backend within a seed.
 
 A completed Stage 1 can be reused independently. Set the relevant experiment's
@@ -140,22 +189,22 @@ their OR combination, no defense and IG. Prompt Guard 2 replaces ToolResultParsi
 this is not a reproduction of ToolResultParsing. Baselines are offline channel
 adaptations. Individual payload/window scores and channel verdicts are retained.
 
-Item 4 compares the same L3 on channels, channel OR and history, with explicit
+Item 4 compares the same Audit on channels, channel OR and history, with explicit
 original-prompt anchoring. It saves complete-fragment correlated candidates;
 both fragments existing does not establish their joint causal necessity.
 
-Item 5 changes only L3 backend over fixed upstream routing. The supplied local
+Item 5 changes only Audit backend over fixed upstream routing. The supplied local
 candidates must be available in their configured environments. Item 6 sweeps
-validation-derived L1 gates, not test-selected numerical thresholds. Item 7
+validation-derived Gate gates, not test-selected numerical thresholds. Item 7
 samples 90/92/94/96/98% benign prefixes without replacement, with reproducible
 IDs and attack-category stratification, keeping thresholds fixed per seed.
-Item 7 now compares `experiments.benign.orders: [L1-L2-L3, L2-L1-L3]` on the
+Item 7 now compares `experiments.benign.orders: [Gate-Screen-Audit, Screen-Gate-Audit]` on the
 exact same ordered prefix IDs for each seed/ratio. Sampling happens once before
-the order loop; thresholds are not retuned. It reuses Stage 1 L1/L2 scores and
-runs L3 only for each condition's pending set under the configured timing policy.
+the order loop; thresholds are not retuned. It reuses Stage 1 Gate/Screen scores and
+runs Audit only for each condition's pending set under the configured timing policy.
 Results are separated as `benign/seed_<seed>/benign_<ratio>/<order>/`; shared
 `workload.json` records and paired-workload hashes prove the pairing. Each order
-also records benign prefixes forwarded by L1 at the front gate. Summaries group
+also records benign prefixes forwarded by Gate at the front gate. Summaries group
 by `benign_<ratio>/<order>`. The main figure compares both orders' F1/estimated
 latency; each order retains a separate F1/traffic/latency figure, without titles.
 Because these are partial-prefix workloads, whole-episode ASR/false-blocking is
@@ -185,7 +234,7 @@ Every menu item (0-8) prints live `[IG]` updates without extra parameters:
 current stage, seed/condition, completed/total units, a percentage bar, elapsed
 time and estimated remaining time when the total is known. Training reports
 encoder optimizer steps/validation batches and AE candidates/epochs/batches;
-evaluation reports L1 prefixes, L2 windows, L3 requests/batches and RAG documents.
+evaluation reports Gate prefixes, Screen windows, Audit requests/batches and RAG documents.
 Dataset preparation reports annotation, split, prefix expansion and exports.
 Backup reports copied bytes/files and ZIP verification.
 

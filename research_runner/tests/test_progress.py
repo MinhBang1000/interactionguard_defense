@@ -126,7 +126,7 @@ class ProgressTests(unittest.TestCase):
         def child(command, **kwargs):
             log = kwargs['stdout']
             log.write('private raw trace text is not a progress line\n')
-            log.write('[IG] l3_batches | running [##########----------] 1/2 batches (50.0%) | elapsed 00:00:01\n')
+            log.write('[IG] audit_batches | running [##########----------] 1/2 batches (50.0%) | elapsed 00:00:01\n')
             log.flush()
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:

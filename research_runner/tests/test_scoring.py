@@ -7,13 +7,13 @@ import subprocess
 import sys
 import unittest
 
-from data.data_preprocess import ROOT, normalize_trace, sha256
-from eval.asr import CONTRACT, episode_hash, original_outcome, score_episode, summarize
-from research_runner.scoring import calibrate_l1, calibrate_l2, metrics, route, score_episodes
+from research_runner.implementation.data.data_preprocess import ROOT, normalize_trace, sha256
+from research_runner.implementation.evaluation.asr import CONTRACT, episode_hash, original_outcome, score_episode, summarize
+from research_runner.scoring import calibrate_gate, calibrate_screen, metrics, route, score_episodes
 
 
-ORDERS = [["L1"], ["L2"], ["L3"], ["L1", "L2"], ["L2", "L1"],
-          ["L1", "L3"], ["L2", "L3"], ["L1", "L2", "L3"], ["L2", "L1", "L3"]]
+ORDERS = [["Gate"], ["Screen"], ["Audit"], ["Gate", "Screen"], ["Screen", "Gate"],
+          ["Gate", "Audit"], ["Screen", "Audit"], ["Gate", "Screen", "Audit"], ["Screen", "Gate", "Audit"]]
 
 
 def row(id_="prefix", step=0, prediction=0, **kwargs):
@@ -53,17 +53,17 @@ def reference_metrics(labels, scores, threshold):
 
 class RoutingTests(unittest.TestCase):
     def test_all_nine_orders_exhaustive_scores_boundaries_and_verdicts(self):
-        for order, l1, l2, l3 in itertools.product(ORDERS, (0.4, 0.5, 0.6),
+        for order, gate, screen, audit in itertools.product(ORDERS, (0.4, 0.5, 0.6),
                                                   (0.4, 0.5, 0.6), (None, 0, 1)):
-            with self.subTest(order=order, l1=l1, l2=l2, l3=l3):
+            with self.subTest(order=order, gate=gate, screen=screen, audit=audit):
                 expected, prediction, pending = [], None, False
                 for index, layer in enumerate(order):
-                    if layer == "L3":
-                        action = "Pending" if l3 is None else "Stop" if l3 else "Forward"
-                    elif layer == "L1":
-                        action = "Forward" if l1 <= 0.5 else "Stop" if index == len(order) - 1 else "Check"
+                    if layer == "Audit":
+                        action = "Pending" if audit is None else "Stop" if audit else "Forward"
+                    elif layer == "Gate":
+                        action = "Forward" if gate <= 0.5 else "Stop" if index == len(order) - 1 else "Check"
                     else:
-                        action = "Stop" if l2 > 0.5 else "Forward" if index == len(order) - 1 else "Check"
+                        action = "Stop" if screen > 0.5 else "Forward" if index == len(order) - 1 else "Check"
                     expected.append({"layer": layer, "action": action})
                     if action == "Pending":
                         pending = True
@@ -71,16 +71,16 @@ class RoutingTests(unittest.TestCase):
                     if action != "Check":
                         prediction = int(action == "Stop")
                         break
-                result = route([row()], {"prefix": {"score": l1}},
-                               {"prefix": {"score": l2}}, order, 0.5, 0.5,
-                               {} if l3 is None else {"prefix": l3})[0]
+                result = route([row()], {"prefix": {"score": gate}},
+                               {"prefix": {"score": screen}}, order, 0.5, 0.5,
+                               {} if audit is None else {"prefix": audit})[0]
                 self.assertEqual(result["route"], expected)
                 self.assertEqual(result["prediction"], prediction)
-                self.assertEqual(result["pending_l3"], pending)
+                self.assertEqual(result["pending_audit"], pending)
 
     def test_invalid_orders(self):
-        for order in ([], ["L4"], ["L1", "L1"], ["L3", "L1"],
-                      ["L1", "L3", "L2"], "L1", ("L1",), [["L1"]]):
+        for order in ([], ["L4"], ["Gate", "Gate"], ["Audit", "Gate"],
+                      ["Gate", "Audit", "Screen"], "Gate", ("Gate",), [["Gate"]]):
             with self.subTest(order=order), self.assertRaises(ValueError):
                 route([], {}, {}, order, 0.5, 0.5)
 
@@ -89,47 +89,47 @@ class RoutingTests(unittest.TestCase):
         cache = {"prefix": {"score": 0.9, "seconds": 0.2, "channels": {"prompt": 0.9}}}
         verdicts = {"prefix": {"prediction": 1, "seconds": 2.0}}
         original = copy.deepcopy((source, cache, verdicts))
-        result = route(source, cache, {}, ["L1", "L3"], 0.5, None, verdicts)[0]
-        self.assertEqual(result["layer_scores"], {"L1": cache["prefix"], "L3": verdicts["prefix"]})
-        result["layer_scores"]["L1"]["channels"]["prompt"] = 0
+        result = route(source, cache, {}, ["Gate", "Audit"], 0.5, None, verdicts)[0]
+        self.assertEqual(result["layer_scores"], {"Gate": cache["prefix"], "Audit": verdicts["prefix"]})
+        result["layer_scores"]["Gate"]["channels"]["prompt"] = 0
         self.assertEqual((source, cache, verdicts), original)
         self.assertEqual(result["attack_type"], "correlated")
 
     def test_lazy_lookup_and_missing_visited_scores(self):
         self.assertEqual(route([row()], {"prefix": {"score": 0}}, {},
-                               ["L1", "L2", "L3"], 0.5, 0.5)[0]["prediction"], 0)
+                               ["Gate", "Screen", "Audit"], 0.5, 0.5)[0]["prediction"], 0)
         self.assertEqual(route([row()], {}, {"prefix": {"score": 1}},
-                               ["L2", "L1"], 0.5, 0.5)[0]["prediction"], 1)
+                               ["Screen", "Gate"], 0.5, 0.5)[0]["prediction"], 1)
         with self.assertRaises(ValueError):
-            route([row()], {}, {}, ["L1"], 0.5, None)
-        self.assertEqual(route([row()], None, None, ["L3"], None, None,
+            route([row()], {}, {}, ["Gate"], 0.5, None)
+        self.assertEqual(route([row()], None, None, ["Audit"], None, None,
                                {"prefix": {"prediction": 0}})[0]["prediction"], 0)
 
-    def test_invalid_scores_thresholds_and_l3_verdicts(self):
+    def test_invalid_scores_thresholds_and_audit_verdicts(self):
         for value in (float("nan"), float("inf"), None, True, "0.5"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                route([row()], {"prefix": {"score": value}}, {}, ["L1"], 0.5, None)
+                route([row()], {"prefix": {"score": value}}, {}, ["Gate"], 0.5, None)
             with self.subTest(threshold=value), self.assertRaises(ValueError):
-                route([], {}, {}, ["L1"], value, None)
+                route([], {}, {}, ["Gate"], value, None)
         for value in (-0.1, 1.1):
             with self.assertRaises(ValueError):
-                route([row()], {}, {"prefix": {"score": value}}, ["L2"], None, 0.5)
+                route([row()], {}, {"prefix": {"score": value}}, ["Screen"], None, 0.5)
         for value in (True, 2, "1", 1.0, {"prediction": None}, {}):
-            with self.subTest(l3=value), self.assertRaises(ValueError):
-                route([row()], {}, {}, ["L3"], None, None, {"prefix": value})
+            with self.subTest(audit=value), self.assertRaises(ValueError):
+                route([row()], {}, {}, ["Audit"], None, None, {"prefix": value})
 
     def test_duplicate_rows_and_label_independence(self):
         with self.assertRaises(ValueError):
-            route([row(), row()], {}, {}, ["L3"], None, None)
+            route([row(), row()], {}, {}, ["Audit"], None, None)
         a, b = [route([row(label=label)], {"prefix": {"score": 0.8}}, {},
-                      ["L1", "L3"], 0.5, None, {"prefix": 0})[0] for label in (0, 1)]
+                      ["Gate", "Audit"], 0.5, None, {"prefix": 0})[0] for label in (0, 1)]
         for result in (a, b):
             result.pop("label")
         self.assertEqual(a, b)
 
 
 class CalibrationTests(unittest.TestCase):
-    def test_l1_exact_exhaustive_training_objective(self):
+    def test_gate_exact_exhaustive_training_objective(self):
         for labels in itertools.product((0, 1), repeat=4):
             if set(labels) != {0, 1}:
                 continue
@@ -140,7 +140,7 @@ class CalibrationTests(unittest.TestCase):
                     m = reference_metrics(labels, scores, threshold)
                     candidates.append((m["f1"], -m["fpr"], m["recall"], threshold))
                 for floor in (0, 0.5, 0.98, 1):
-                    result = calibrate_l1(labels, scores, floor)
+                    result = calibrate_gate(labels, scores, floor)
                     chosen = max(c for c in candidates if c[2] >= floor)
                     self.assertEqual(result["threshold"], chosen[3])
                     self.assertEqual(result["metrics"], reference_metrics(labels, scores, chosen[3]))
@@ -149,12 +149,12 @@ class CalibrationTests(unittest.TestCase):
                     self.assertEqual(result["objective"], "max_validation_f1_subject_to_recall_floor")
                     self.assertEqual(result["comparison"], "strict_greater_than")
 
-    def test_l1_max_f1_is_not_minimum_fpr(self):
-        result = calibrate_l1([1, 0, 1, 1, 1], [0.1, 0.2, 0.3, 0.4, 0.5], 0.5)
+    def test_gate_max_f1_is_not_minimum_fpr(self):
+        result = calibrate_gate([1, 0, 1, 1, 1], [0.1, 0.2, 0.3, 0.4, 0.5], 0.5)
         self.assertEqual(result["metrics"]["recall"], 1)
         self.assertEqual(result["metrics"]["fpr"], 1)
 
-    def test_l2_exact_brute_force_policy(self):
+    def test_screen_exact_brute_force_policy(self):
         randomizer = random.Random(63)
         for _ in range(300):
             labels = [0, 1] + [randomizer.randrange(2) for _ in range(18)]
@@ -167,21 +167,21 @@ class CalibrationTests(unittest.TestCase):
                     if m["fp"] <= allowed:
                         candidates.append((m["tp"], -m["fp"], threshold, m))
                 chosen = max(candidates, key=lambda c: c[:3])
-                result = calibrate_l2(labels, scores, budget)
+                result = calibrate_screen(labels, scores, budget)
                 self.assertEqual(result["threshold"], chosen[2])
                 self.assertEqual(result["validation"], chosen[3])
                 self.assertEqual(result["allowed_false_positives"], allowed)
                 self.assertEqual(result["nonempty_true_positive_coverage"], chosen[0] > 0)
 
-    def test_l2_ties_probability_endpoints_and_no_tp(self):
-        result = calibrate_l2([0, 1], [0.5, 0.5], 0)
+    def test_screen_ties_probability_endpoints_and_no_tp(self):
+        result = calibrate_screen([0, 1], [0.5, 0.5], 0)
         self.assertEqual(result["threshold"], 1)
         self.assertFalse(result["nonempty_true_positive_coverage"])
-        self.assertEqual(calibrate_l2([0, 1], [0, 1], 0)["threshold"], 0)
-        self.assertEqual(calibrate_l2([0, 1], [0, 0], 1)["threshold"], 1)
+        self.assertEqual(calibrate_screen([0, 1], [0, 1], 0)["threshold"], 0)
+        self.assertEqual(calibrate_screen([0, 1], [0, 0], 1)["threshold"], 1)
 
     def test_invalid_calibration_inputs(self):
-        for function in (calibrate_l1, calibrate_l2):
+        for function in (calibrate_gate, calibrate_screen):
             for labels, scores in (([], []), ([0], [0.5]), ([1], [0.5]),
                                    ([0, 1], [0.1]), ([0, 2], [0, 1]),
                                    ([False, 1], [0, 1]), ([0, 1], [0, float("nan")])):
@@ -191,7 +191,7 @@ class CalibrationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     function([0, 1], [0, 1], gate)
         with self.assertRaises(ValueError):
-            calibrate_l2([0, 1], [-0.1, 1])
+            calibrate_screen([0, 1], [-0.1, 1])
 
 
 class MetricTests(unittest.TestCase):
@@ -214,7 +214,7 @@ class MetricTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 metrics([row(label=value)])
         with self.assertRaises(ValueError):
-            metrics([row(prediction=0, pending_l3=True)])
+            metrics([row(prediction=0, pending_audit=True)])
 
 
 class EpisodeTests(unittest.TestCase):
@@ -276,7 +276,7 @@ class EpisodeTests(unittest.TestCase):
         outcome = original_outcome(trace)
         trace["asr_outcome"] = {
             "contract": CONTRACT, "episode_sha256": episode_hash(trace), "attack_type": "tool",
-            "known_payload_rules_sha256": sha256(ROOT / "data/data_preprocess.py"),
+            "known_payload_rules_sha256": json.loads((ROOT / "research_runner/implementation/origins.json").read_text())['frozen_rules_sha256'],
             "verdict": "SUCCESS", "attack_success": True,
             **{key: outcome[key] for key in ("success_step", "last_safe_prefix_step", "unknown_reason", "target_actions", "evidence_scope")},
             "success_rule": outcome["rule"]}
@@ -305,7 +305,7 @@ class EpisodeTests(unittest.TestCase):
     def test_invalid_joins_pending_and_duplicate_steps_rejected(self):
         for rows in ([row(original_trace_id="missing")], [row(), row()],
                      [row("a"), row("b")], [row(step=8)], [row(prediction=None)],
-                     [row(prediction=True)], [row(pending_l3=True)]):
+                     [row(prediction=True)], [row(pending_audit=True)]):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 score_episodes([episode()], rows)
         with self.assertRaises(ValueError):

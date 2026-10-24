@@ -15,11 +15,11 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from data.data_preprocess import normalize_trace
-from data.data_split import SOURCES, SPLITS
-from data.test_preprocessing import episode
-from eval.asr import episode_hash
-from eval.prompt_success_judge import PROMPT_VERSION
+from research_runner.implementation.data.data_preprocess import normalize_trace
+from research_runner.implementation.data.data_split import SOURCES, SPLITS
+from research_runner.tests.fixtures import episode
+from research_runner.implementation.evaluation.asr import episode_hash
+from research_runner.implementation.evaluation.prompt_success_judge import PROMPT_VERSION
 from research_runner.artifacts import (
     ArtifactError, ExistingResultsError, IncompatibleResultsError,
     file_sha256, read_json, read_jsonl, write_json, write_jsonl,
@@ -53,15 +53,15 @@ class FakeBackend:
         write_json(encoder / "config.json", {"fake_model": True, "seed": seed})
         write_json(encoder / "model.safetensors", {"fake_weights": seed})
         write_json(ae, {"fake_weights": seed})
-        metadata = {"seed": seed, "l1_threshold": 0.5,
+        metadata = {"seed": seed, "gate_threshold": 0.5,
                     "encoder_path": str(encoder), "ae_path": str(ae),
                     "selection_path": str(selection)}
         write_json(selection, {"threshold": 0.5, "selection_source": "validation_only"})
         write_json(output / "checkpoint.json", metadata)
         return metadata
 
-    def score_l1(self, rows, checkpoint):
-        self.calls.append(("score_l1", checkpoint["seed"], tuple(r["id"] for r in rows)))
+    def score_gate(self, rows, checkpoint):
+        self.calls.append(("score_gate", checkpoint["seed"], tuple(r["id"] for r in rows)))
         records = [{"id": row["id"], "score": 0.8 if row["label"] else 0.1,
                     "seconds": 0.001, "timing_scope": "fake_cpu_per_prefix"}
                    for row in rows]
@@ -73,7 +73,7 @@ class FakeBackend:
         self.calls.append(("score_detector", model_config["model"],
                            tuple(channels or ()), tuple(r["id"] for r in rows)))
         # Benign validation scores fix a nontrivial gate. Some positive prefixes
-        # remain below it, so the actual routing invokes L3 rather than going idle.
+        # remain below it, so the actual routing invokes Audit rather than going idle.
         return [{"id": row["id"],
                  "score": (0.9 if row["step_number"] % 2 else 0.1) if row["label"] else 0.2,
                  "channels": [{"channel": c, "score": 0.2} for c in channels or ("prompt", "retrieval", "tool")],
@@ -86,11 +86,11 @@ class FakeBackend:
                  "prediction": int(bool(row["channels"]["retrieval"]) and bool(row["label"])),
                  "seconds": 0.004} for row in rows]
 
-    def infer_l3(self, requests, backend_config=None):
-        self.calls.append(("infer_l3", deepcopy(backend_config), deepcopy(requests)))
+    def infer_audit(self, requests, backend_config=None):
+        self.calls.append(("infer_audit", deepcopy(backend_config), deepcopy(requests)))
         if self.fail_next_inference:
             self.fail_next_inference = False
-            raise RuntimeError("Synthetic interrupted L3 worker")
+            raise RuntimeError("Synthetic interrupted Audit worker")
         responses = []
         for request in requests:
             prediction = int(any(text in request["payload"] for text in
@@ -98,7 +98,7 @@ class FakeBackend:
             responses.append({"request_id": request["request_id"], "prediction": prediction,
                               "seconds": 0.003, "cache_used": False,
                               "timing_scope": "fake_cpu_uncached_request",
-                              "backend": (backend_config or self.config["models"]["l3"])["backend"]})
+                              "backend": (backend_config or self.config["models"]["audit"])["backend"]})
         if self.bad_response_ids and responses:
             responses[0]["request_id"] = "foreign_request_id"
         # Deliberately return out of order; production alignment must join by ID.
@@ -135,10 +135,10 @@ class EngineTests(unittest.TestCase):
         self.workspace = Path(contexts.enter_context(tempfile.TemporaryDirectory()))
         contexts.enter_context(redirect_stdout(io.StringIO()))
         contexts.enter_context(patch("subprocess.run", side_effect=AssertionError("No real subprocess in CPU integration tests")))
-        contexts.enter_context(patch("eval.prompt_success_judge.judge_episode", side_effect=AssertionError("No model calls")))
-        contexts.enter_context(patch("eval.prompt_success_judge.run_vllm", side_effect=AssertionError("No GPU calls")))
+        contexts.enter_context(patch("research_runner.implementation.evaluation.prompt_success_judge.judge_episode", side_effect=AssertionError("No model calls")))
+        contexts.enter_context(patch("research_runner.implementation.evaluation.prompt_success_judge.run_vllm", side_effect=AssertionError("No GPU calls")))
         self.config = load_config(CONFIG, root=self.workspace)
-        self.config["runtime"].update(device="cpu", python=sys.executable, l3_python=sys.executable)
+        self.config["runtime"].update(device="cpu", python=sys.executable, audit_python=sys.executable)
         self.config["training"]["seeds"] = [42, 43]
         self.config["data"]["reference_test_sha256"] = None
         self.config["data"]["judge"]["skip"] = True
@@ -218,7 +218,7 @@ class EngineTests(unittest.TestCase):
                          str(directory / 'annotated'))
         self.assertEqual(read_json(directory / 'asr/test_baseline_asr_v3.json')['provenance']['traces_path'],
                          str(directory / 'splits/test.jsonl'))
-        from data.prepare_training import load_prepared
+        from research_runner.implementation.data.prepare_training import load_prepared
         for stage in ('encoder', 'autoencoder'):
             for split in ('train', 'val'):
                 self.assertTrue(load_prepared(stage, split, output_dir=directory / 'training'))
@@ -238,7 +238,7 @@ class EngineTests(unittest.TestCase):
         if expected_ids is not None:
             self.assertEqual(ids, expected_ids)
         self.assertTrue(all(type(d["prediction"]) is int and d["prediction"] in (0, 1) for d in decisions))
-        self.assertTrue(all(not d.get("pending_l3", False) for d in decisions))
+        self.assertTrue(all(not d.get("pending_audit", False) for d in decisions))
         stats = read_json(directory / "metrics.json")
         self.assertEqual(stats["samples"], len(ids))
         self.assertEqual(stats["sample_ids"], ids)
@@ -246,7 +246,7 @@ class EngineTests(unittest.TestCase):
         timing = read_json(directory / "timing.json")
         self.assertEqual(timing["interpretation"], "component_based_pipeline_estimate_not_direct_end_to_end")
         self.assertGreaterEqual(timing["estimated_pipeline_seconds_per_sample"], 0)
-        for layer in ("L1", "L2", "L3"):
+        for layer in ("Gate", "Screen", "Audit"):
             self.assertEqual(stats["processed_counts"][layer],
                              sum(any(s["layer"] == layer for s in d.get("route", [])) for d in decisions))
         if episode_level:
@@ -267,7 +267,7 @@ class EngineTests(unittest.TestCase):
         checkpoints = read_json(training / "checkpoints.json")
         self.assertEqual(set(checkpoints), {"42", "43"})
         for checkpoint in checkpoints.values():
-            self.assertEqual(checkpoint["l1_threshold"], 0.5)
+            self.assertEqual(checkpoint["gate_threshold"], 0.5)
             self.assertTrue(Path(checkpoint["encoder_path"]).is_dir())
             self.assertTrue(Path(checkpoint["ae_path"]).is_file())
             self.assertNotIn(".staging", checkpoint["encoder_path"])
@@ -277,23 +277,23 @@ class EngineTests(unittest.TestCase):
         rows = self.runner.rows()
         ids = [r["id"] for r in rows]
         for seed in (42, 43):
-            requests = read_jsonl(first / f"seed_{seed}/l3_requests.jsonl")
+            requests = read_jsonl(first / f"seed_{seed}/audit_requests.jsonl")
             self.assertTrue(requests)
             for order in self.config["experiments"]["configuration"]["orders"]:
                 staged = read_jsonl(first / f"seed_{seed}/{order}/routing.jsonl")
                 self.assertEqual([d["id"] for d in staged], ids)
-                pending = {d["id"] for d in staged if d["pending_l3"]}
+                pending = {d["id"] for d in staged if d["pending_audit"]}
                 self.assertEqual(pending, {r["prefix_id"] for r in requests if r["configuration"] == order})
                 self.verify_report(second / f"seed_{seed}/{order}", ids)
             for request in requests:
                 source = next(r for r in rows if r["id"] == request["prefix_id"])
-                self.assertEqual(request["payload"], build_payload(source["sequence"], self.config["models"]["l3"]["payload"]))
+                self.assertEqual(request["payload"], build_payload(source["sequence"], self.config["models"]["audit"]["payload"]))
                 self.assertEqual(request["request_id"], hashlib.sha256(request["payload"].encode()).hexdigest())
-            timing = read_json(second / f"seed_{seed}/l3/timing.json")
+            timing = read_json(second / f"seed_{seed}/audit/timing.json")
             self.assertTrue(timing["uncached_measured"])
             self.assertFalse(timing["cache_used"])
             self.assertEqual(timing["submitted_requests"], len(requests))
-            responses = read_jsonl(second / f"seed_{seed}/l3/aligned_responses.jsonl")
+            responses = read_jsonl(second / f"seed_{seed}/audit/aligned_responses.jsonl")
             self.assertEqual([r["prefix_id"] for r in responses], [r["prefix_id"] for r in requests])
             self.assertTrue(all(r["seconds"] == 0.003 for r in responses))
         for item, name in ((3, "baselines"), (4, "channel_ablation"), (5, "backend"),
@@ -312,6 +312,17 @@ class EngineTests(unittest.TestCase):
         self.verify_backends(first)
         self.verify_thresholds()
         self.verify_benign_workloads(set(ids))
+        # The real serialization pipeline must emit functional names, not merely
+        # accept them in an in-memory routing unit test.
+        import re
+        old_token = re.compile(r'(?<![A-Za-z0-9])[lL][123](?=$|[^A-Za-z0-9])')
+        for path in self.results.rglob('*'):
+            self.assertIsNone(old_token.search(path.name), str(path))
+        snapshot = read_json(second / 'effective_config.json')
+        self.assertEqual(snapshot['naming'], self.config['naming'])
+        for row in read_jsonl(second / 'seed_42/Screen-Gate-Audit/prefix_decisions.jsonl'):
+            self.assertNotIn('pending_l3', row)
+            self.assertTrue(set(row['layer_scores']) <= {'Screen', 'Gate', 'Audit'})
         archive_path = self.runner.run(8)
         for name in ('dataset', 'training', 'configuration', 'baselines', 'channel_ablation',
                      'backend', 'threshold', 'benign', 'backup'):
@@ -350,14 +361,14 @@ class EngineTests(unittest.TestCase):
     def verify_channels(self, rows):
         directory = self.results / "channel_ablation"
         for seed in (42, 43):
-            requests = read_jsonl(directory / f"seed_{seed}/l3/requests.jsonl")
+            requests = read_jsonl(directory / f"seed_{seed}/audit/requests.jsonl")
             conditions = {r["condition"] for r in requests}
             self.assertEqual(conditions, {"prompt", "retrieval", "tool", "history"})
             self.assertEqual(len(requests), len(rows) * 4)
             for req in requests:
                 source = next(r for r in rows if r["id"] == req["prefix_id"])
                 channel = None if req["condition"] == "history" else req["condition"]
-                self.assertEqual(req["payload"], build_payload(source["sequence"], self.config["models"]["l3"]["payload"], channel, "original_prompt"))
+                self.assertEqual(req["payload"], build_payload(source["sequence"], self.config["models"]["audit"]["payload"], channel, "original_prompt"))
                 self.assertIn(source["channels"]["prompt"], req["payload"])
             cases = read_jsonl(directory / f"seed_{seed}/correlated_cases.jsonl")
             self.assertTrue(cases)
@@ -365,13 +376,13 @@ class EngineTests(unittest.TestCase):
 
     def verify_backends(self, first):
         for seed in (42, 43):
-            expected = {r["prefix_id"] for r in read_jsonl(first / f"seed_{seed}/l3_requests.jsonl")
-                        if r["configuration"] == "L1-L2-L3"}
+            expected = {r["prefix_id"] for r in read_jsonl(first / f"seed_{seed}/audit_requests.jsonl")
+                        if r["configuration"] == "Gate-Screen-Audit"}
             identities = []
             for candidate in self.config["experiments"]["backend"]["candidates"]:
                 directory = self.results / f"backend/seed_{seed}/{candidate['name']}"
                 identities.append(read_json(directory / "routing_identity.json")["pending_set_sha256"])
-                requests = read_jsonl(directory / "l3/requests.jsonl")
+                requests = read_jsonl(directory / "audit/requests.jsonl")
                 self.assertEqual({r["prefix_id"] for r in requests}, expected)
             self.assertEqual(len(set(identities)), 1)
 
@@ -380,7 +391,7 @@ class EngineTests(unittest.TestCase):
             report = read_json(path)
             self.assertEqual(report["selection_source"], "validation_only")
             self.assertTrue(report["other_models_and_policies_fixed"])
-            self.assertEqual(report["l1"]["objective"], "max_validation_f1_subject_to_recall_floor")
+            self.assertEqual(report["gate"]["objective"], "max_validation_f1_subject_to_recall_floor")
 
     def verify_benign_workloads(self, allowed_ids):
         paired = {}
@@ -392,11 +403,11 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(set(ids) <= allowed_ids)
             self.assertEqual(report["actual_benign_ratio"], int(5 * report["requested_benign_ratio"]) / 5)
             self.assertEqual(report["profile"], "main")
-            self.assertEqual(report["l1_threshold"], 0.5)
+            self.assertEqual(report["gate_threshold"], 0.5)
             relative = path.relative_to(self.results / 'benign').parts
             key = relative[:2]
             identity = (report['sample_ids'], report['paired_workload_sha256'],
-                        report['sampling_seed'], report['l1_threshold'], report['l2_threshold'])
+                        report['sampling_seed'], report['gate_threshold'], report['screen_threshold'])
             if key not in paired:
                 paired[key] = (identity, set())
             self.assertEqual(paired[key][0], identity)
@@ -406,7 +417,7 @@ class EngineTests(unittest.TestCase):
                 decisions = read_jsonl(path.parent / 'prefix_decisions.jsonl')
                 self.assertEqual([d['id'] for d in decisions], ids)
                 self.assertTrue(all(d['route'][0]['layer'] == order.split('-')[0] for d in decisions))
-                expected = sum(d['label'] == 0 and d['route'][0] == {'layer': 'L1', 'action': 'Forward'} for d in decisions)
+                expected = sum(d['label'] == 0 and d['route'][0] == {'layer': 'Gate', 'action': 'Forward'} for d in decisions)
                 self.assertEqual(report['benign_front_gate_forward_count'], expected)
         for identity, configurations in paired.values():
             self.assertEqual(configurations, set(self.config['experiments']['benign']['orders']))
@@ -459,18 +470,18 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ArtifactError):
             self.runner.compatible('dataset')
 
-    def test_real_config_keeps_l3_prompt_schema_and_payload_assets(self):
+    def test_real_config_keeps_audit_prompt_schema_and_payload_assets(self):
         original = load_config(CONFIG)
-        self.assertEqual(self.config["models"]["l3"], original["models"]["l3"])
-        prompt = self.config["models"]["l3"]["system_prompt"]
-        self.assertEqual(hashlib.sha256(prompt.encode()).hexdigest(), self.config["models"]["l3"]["system_prompt_sha256"])
+        self.assertEqual(self.config["models"]["audit"], original["models"]["audit"])
+        prompt = self.config["models"]["audit"]["system_prompt"]
+        self.assertEqual(hashlib.sha256(prompt.encode()).hexdigest(), self.config["models"]["audit"]["system_prompt_sha256"])
         self.assertEqual(self.config["paths"]["workspace"], str(self.workspace))
         self.assertEqual(self.config["runtime"]["device"], "cpu")
 
     def test_inference_only_settings_do_not_invalidate_dataset_or_training(self):
         self.prepare(training=True)
         before = self.runner.compatible('training', ('dataset',))
-        self.config['runtime']['l3_python'] = '/different/vllm/python'
+        self.config['runtime']['audit_python'] = '/different/vllm/python'
         self.config['experiments']['backend']['candidates'].append({
             'name': 'another_backend', 'backend': 'openai-compatible', 'model': 'remote-model'})
         self.assertEqual(self.runner.compatible('training', ('dataset',)), before)
@@ -560,7 +571,7 @@ class EngineTests(unittest.TestCase):
         self.runner.configuration_stage1()
         before = file_sha256(self.results / "configuration_stage1/manifest.json")
         self.backend.bad_response_ids = True
-        with self.assertRaisesRegex(ValueError, "L3 responses"):
+        with self.assertRaisesRegex(ValueError, "Audit responses"):
             self.runner.configuration_stage2()
         self.assertEqual(file_sha256(self.results / "configuration_stage1/manifest.json"), before)
         self.verify_artifact("configuration_stage1")

@@ -41,11 +41,11 @@ class ProcessExecutor:
         destination.mkdir(parents=True, exist_ok=True)
         spec = destination / 'worker_job.json'
         spec.write_text(json.dumps({'operation': operation, 'config': self.config, 'job': job}, indent=2))
-        backend = {**self.config.get('models', {}).get('l3', {}), **(job.get('backend') or {})}
+        backend = {**self.config.get('models', {}).get('audit', {}), **(job.get('backend') or {})}
         if not llm or backend.get('backend', 'vllm') == 'vllm':
             require_idle_gpu(self.config)
         runtime = self.config['runtime']
-        python = runtime['l3_python'] if llm else runtime['python']
+        python = runtime['audit_python'] if llm else runtime['python']
         if not Path(python).is_file():
             raise RuntimeError(f'Configured Python interpreter is unavailable: {python}')
         print(f'Starting {operation} worker. Log: {destination / "worker.log"}', flush=True)

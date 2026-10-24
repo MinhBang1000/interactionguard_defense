@@ -23,7 +23,7 @@ def render(summary, directory):
                   color='#222222', linestyle='--', marker='^', label='F1 score', capsize=3)
     sweep = all(label.startswith(('recall_', 'validation_max_f1', 'benign_')) for label in labels)
     if sweep:
-        for layer, color, marker in [('L2', '#0077aa', 'o'), ('L3', '#009977', 's')]:
+        for layer, color, marker in [('Screen', '#0077aa', 'o'), ('Audit', '#009977', 's')]:
             left.errorbar(positions, [v['traffic'][layer]['mean'] * 100 for v in values],
                           yerr=[v['traffic'][layer]['std'] * 100 for v in values],
                           color=color, marker=marker, capsize=3, label=f'Samples processed by {layer}')

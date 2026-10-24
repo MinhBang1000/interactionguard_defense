@@ -1,12 +1,22 @@
 # InteractionGuard campaign. Edit this file only; the menu asks no parameters.
 version: 1
+naming:
+  version: 2
+  legacy:
+    L1: Gate
+    L2: Screen
+    L3: Audit
+  paper:
+    Screen: L1
+    Gate: L2
+    Audit: L3
 paths:
   workspace: ..
   results: results/research_runner
   backup: backup
 runtime:
   python: /home/bang/anaconda3/envs/agent_defense/bin/python
-  l3_python: experiments/side_tests/vllm_layer3/.venv/bin/python
+  audit_python: experiments/side_tests/vllm_layer3/.venv/bin/python
   device: "0"
   max_gpu_memory_mib: 1024
   gpu_wait_seconds: 60
@@ -22,8 +32,8 @@ data:
 training:
   seeds: [42, 43, 44, 45, 46]
   calibration:
-    l1_recall_floor: 0.999
-    l2_fpr_budget: 0.01
+    gate_recall_floor: 0.999
+    screen_fpr_budget: 0.01
     ae_selection_recall_floor: 0.98
   excluded_attack_types: [correlated]
 models:
@@ -59,7 +69,7 @@ models:
     search_latent_dims: [32, 64]
     scheduler_factor: 0.5
     scheduler_patience: 5
-  l2:
+  screen:
     model: deepset/deberta-v3-base-injection
     revision: 80dda00d0b0d9a03917a7685e2ddbcd28e04dbb1
     malicious_label: 1
@@ -68,7 +78,7 @@ models:
     window_overlap: 64
     aggregation: mean
     threshold_reference: 0.9989207983016968
-  l3:
+  audit:
     backend: vllm
     model: meta-llama/Llama-3.1-8B-Instruct
     revision: 0e9e39f249a16976918f6564b8830bc894c89659
@@ -303,7 +313,7 @@ experiments:
     stage: full
     resume: false
     terminal_policy: binary_at_own_threshold
-    orders: [L1, L2, L3, L1-L2, L1-L3, L2-L3, L2-L1, L1-L2-L3, L2-L1-L3]
+    orders: [Gate, Screen, Audit, Gate-Screen, Gate-Audit, Screen-Audit, Screen-Gate, Gate-Screen-Audit, Screen-Gate-Audit]
   baselines:
     resume: false
     fpr_budget: 0.01
@@ -337,7 +347,7 @@ experiments:
     channels: [prompt, retrieval, tool]
   backend:
     resume: false
-    order: L1-L2-L3
+    order: Gate-Screen-Audit
     candidates:
       - name: llama31_8b
         backend: vllm
@@ -349,13 +359,13 @@ experiments:
         revision: 63a8b081895390a26e140280378bc85ec8bce07a
   threshold:
     resume: false
-    order: L1-L2-L3
+    order: Gate-Screen-Audit
     # Validation-derived gates, not numeric gates selected on the test set.
     recall_floors: [0.98, 0.99, 0.995, 0.999]
     include_validation_max_f1: true
   benign:
     resume: false
-    orders: [L1-L2-L3, L2-L1-L3]
+    orders: [Gate-Screen-Audit, Screen-Gate-Audit]
     ratios: [0.90, 0.92, 0.94, 0.96, 0.98]
     total_size: 2000
     sampling_seed: 1729

@@ -54,8 +54,9 @@ class ConsoleTests(unittest.TestCase):
 class PayloadTests(unittest.TestCase):
     def test_frozen_prompt_hash_and_payload_equality_readonly(self):
         config = load_config(ROOT / 'config/experiments.yaml')
-        l3 = config['models']['l3']
-        self.assertEqual(hashlib.sha256(l3['system_prompt'].encode()).hexdigest(), l3['system_prompt_sha256'])
+        audit = config['models']['audit']
+        self.assertEqual(hashlib.sha256(audit['system_prompt'].encode()).hexdigest(), audit['system_prompt_sha256'])
+        # This is a read-only legacy artifact, not a migrated runner result.
         path = ROOT / 'results/side_retrained_l1_deepset_l3/20261021/inputs.jsonl'
         if not path.is_file():
             self.skipTest('Local historical payloads are not distributed with the repository')
@@ -70,7 +71,7 @@ class PayloadTests(unittest.TestCase):
                     # Historical inputs use prefix_id in some snapshots.
                     id_ = old.get('prefix_id')
                 if id_ in rows:
-                    self.assertEqual(build_payload(rows[id_]['sequence'], l3['payload']), old['payload'])
+                    self.assertEqual(build_payload(rows[id_]['sequence'], audit['payload']), old['payload'])
                     compared += 1
         self.assertEqual(compared, len(rows))
 
@@ -114,7 +115,7 @@ class ExecutionTests(unittest.TestCase):
 
     def test_process_completion_is_stage_barrier_and_no_model_import(self):
         with tempfile.TemporaryDirectory() as temp:
-            config = {'runtime': {'device': 'cpu', 'python': '/usr/bin/python3', 'l3_python': '/usr/bin/python3'},
+            config = {'runtime': {'device': 'cpu', 'python': '/usr/bin/python3', 'audit_python': '/usr/bin/python3'},
                       'paths': {'workspace': temp}}
             executor = ProcessExecutor(config)
             events = []

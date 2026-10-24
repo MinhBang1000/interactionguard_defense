@@ -1,12 +1,12 @@
 """Lazy production adapters. Importing this module never imports a GPU library.
 
 The orchestrator calls scoring methods in disposable model workers, and calls
-``infer_l3`` only in its ``runtime.l3_python`` worker. Training starts its own
+``infer_audit`` only in its ``runtime.audit_python`` worker. Training starts its own
 ``runtime.python`` child. No adapter downloads models or promotes checkpoints.
 
-Checkpoint metadata: encoder_path, ae_path, l1_threshold, selection_path,
+Checkpoint metadata: encoder_path, ae_path, gate_threshold, selection_path,
 encoder_sha256, ae_sha256. Terminal decisions use strict score > threshold.
-L3 errors have prediction/verdict=None; callers must not turn them into benign.
+Audit errors have prediction/verdict=None; callers must not turn them into benign.
 """
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ MODEL_SPECS = {
 }
 ENCODER_MODEL = "answerdotai/ModernBERT-base"
 ENCODER_REVISION = "8949b909ec900327062f0ebf497f51aef5e6f0c8"
-L3_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-L3_REVISION = "0e9e39f249a16976918f6564b8830bc894c89659"
+AUDIT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+AUDIT_REVISION = "0e9e39f249a16976918f6564b8830bc894c89659"
 BOOL_KEYS = ("prompt_attack", "retrieve_attack", "tool_attack", "agent_adoption", "is_malicious")
 SECTION_RE = re.compile(r"^\[(PROMPT|RETRIEVE|TOOLS|TOOL:[^\]]+|AGENT|SEP|EOS)\]\s*$", re.M)
 CHANNELS = {"prompt": "prompt", "retrieve": "retrieval", "retrieval": "retrieval",
@@ -61,7 +61,7 @@ def _sha256(path):
 
 
 def _directory_hash(path):
-    # Same contract as training.layer1_common.directory_hash, without numpy.
+    # Same contract as research_runner.implementation.training.gate_common.directory_hash, without numpy.
     digest = hashlib.sha256()
     for file in sorted(Path(path).glob("*")):
         if file.is_file() and file.suffix in {".json", ".safetensors"}:
@@ -116,11 +116,11 @@ def _trim_middle(text, limit):
 def build_payload(sequence, cfg=None):
     """Pure, byte-equivalent O2 payload builder with the frozen clipping caps.
 
-    cfg may be the root config, models.l3, or the nested payload mapping.
+    cfg may be the root config, models.audit, or the nested payload mapping.
     No model, OpenAI SDK, dotenv, or numpy import is needed.
     """
     cfg = cfg or {}
-    cfg = cfg.get("models", {}).get("l3", cfg)
+    cfg = cfg.get("models", {}).get("audit", cfg)
     cfg = cfg.get("payload", cfg)
     prompt_limit = int(cfg.get("max_prompt_chars", 1800))
     block_limit = int(cfg.get("max_block_chars", 1200))
@@ -183,8 +183,8 @@ def _snapshot(repo, revision, path=None, expected_hash=None):
 
 
 def _load_window_scorer(spec, device):
-    from experiments.side_tests.detector_survey import malicious_index
-    from experiments.side_tests.layer2_input_ablation import WindowScorer
+    from research_runner.implementation.detectors.windowing import malicious_index
+    from research_runner.implementation.detectors.windowing import WindowScorer
     import torch
     from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
@@ -231,23 +231,23 @@ def _checkpoint(checkpoint):
     if "best" in checkpoint and "settings" in checkpoint:
         best = checkpoint["best"]
         checkpoint = {"encoder_path": checkpoint["settings"]["encoder_path"],
-                      "ae_path": best["checkpoint"], "l1_threshold": best["calibration"]["threshold"],
+                      "ae_path": best["checkpoint"], "gate_threshold": best["calibration"]["threshold"],
                       "encoder_sha256": checkpoint["settings"].get("encoder_sha256"),
                       "ae_sha256": best.get("checkpoint_sha256")}
-    for key in ("encoder_path", "ae_path", "l1_threshold"):
+    for key in ("encoder_path", "ae_path", "gate_threshold"):
         if key not in checkpoint:
             raise ValueError(f"Checkpoint metadata requires {key}")
     for key in ("encoder_path", "ae_path"):
         path = Path(checkpoint[key]).expanduser()
         checkpoint[key] = str((base / path).resolve() if not path.is_absolute() else path.resolve())
-    checkpoint["l1_threshold"] = _number(checkpoint["l1_threshold"], "l1_threshold")
+    checkpoint["gate_threshold"] = _number(checkpoint["gate_threshold"], "gate_threshold")
     return checkpoint
 
 
-def _load_l1(checkpoint, device):
+def _load_gate(checkpoint, device):
     encoder, ae = Path(checkpoint["encoder_path"]), Path(checkpoint["ae_path"])
     if not encoder.is_dir() or not ae.is_file():
-        raise ValueError("L1 encoder or autoencoder checkpoint missing")
+        raise ValueError("Gate encoder or autoencoder checkpoint missing")
     settings = _read_json(encoder / "training_config.json")
     if settings.get("trust_remote_code", False):
         raise ValueError("Remote model code is not permitted")
@@ -255,8 +255,8 @@ def _load_l1(checkpoint, device):
         raise ValueError("Encoder hash mismatch")
     if checkpoint.get("ae_sha256") and _sha256(ae) != checkpoint["ae_sha256"]:
         raise ValueError("Autoencoder hash mismatch")
-    from models.detectors.layer1_detector import Layer1Detector
-    return Layer1Detector(str(encoder), str(ae), device, checkpoint["l1_threshold"])
+    from research_runner.implementation.detectors.gate import GateDetector
+    return GateDetector(str(encoder), str(ae), device, checkpoint["gate_threshold"])
 
 
 def _release_gpu_cache():
@@ -303,7 +303,7 @@ class RealBackend:
     def __init__(self, config):
         self.config = config
         self._scorers = {}
-        self._l1 = {}
+        self._gate = {}
         self._llm = None
         self._llm_key = None
 
@@ -314,7 +314,7 @@ class RealBackend:
 
     def _release_ml(self):
         self._scorers.clear()
-        self._l1.clear()
+        self._gate.clear()
         gc.collect()
         _release_gpu_cache()
 
@@ -324,45 +324,45 @@ class RealBackend:
         self._llm_key = None
         self._release_ml()
 
-    def score_l1(self, rows, checkpoint):
+    def score_gate(self, rows, checkpoint):
         rows = list(rows)
         if not rows:
             return []
         checkpoint = _checkpoint(checkpoint)
         key = json.dumps(checkpoint, sort_keys=True)
         with _offline():
-            if key not in self._l1:
+            if key not in self._gate:
                 self._release_ml()
-                emit("l1_model_load", 0, 1, unit="models", force=True)
-                self._l1[key] = _load_l1(checkpoint, self._device())
-                emit("l1_model_load", 1, 1, unit="models", status="completed", force=True)
-            detector = self._l1[key]
+                emit("gate_model_load", 0, 1, unit="models", force=True)
+                self._gate[key] = _load_gate(checkpoint, self._device())
+                emit("gate_model_load", 1, 1, unit="models", status="completed", force=True)
+            detector = self._gate[key]
             started = time.perf_counter()
             # Avoid legacy embedding-cache directories and cross-run cache reuse.
-            with tempfile.TemporaryDirectory(prefix="research_l1_") as cache:
-                with _forward_progress(getattr(detector, "embedding_model", None), "l1_embeddings", len(rows)):
+            with tempfile.TemporaryDirectory(prefix="research_gate_") as cache:
+                with _forward_progress(getattr(detector, "embedding_model", None), "gate_embeddings", len(rows)):
                     embeddings = detector.extract_embedding([row["sequence"] for row in rows], batch_size=1, cache_dir=cache)
-                emit("l1_reconstruction", 0, len(rows), unit="sequences", force=True)
+                emit("gate_reconstruction", 0, len(rows), unit="sequences", force=True)
                 errors = detector.compute_reconstruction_errors(embeddings)
-                emit("l1_reconstruction", len(rows), len(rows), unit="sequences", status="completed", force=True)
+                emit("gate_reconstruction", len(rows), len(rows), unit="sequences", status="completed", force=True)
         if len(errors) != len(rows):
-            raise ValueError("L1 returned a different number of scores")
+            raise ValueError("Gate returned a different number of scores")
         seconds = (time.perf_counter() - started) / len(rows)
         result = []
         for row, error in zip(rows, errors):
-            score = _number(error, "L1 error", 0)
-            prediction = int(score > checkpoint["l1_threshold"])
+            score = _number(error, "Gate error", 0)
+            prediction = int(score > checkpoint["gate_threshold"])
             result.append({"id": row["id"], "score": score, "error": score,
                            "prediction": prediction, "decision": "Stop" if prediction else "Forward",
                            "seconds": seconds, "timing_scope": "amortized_batch_excluding_model_load"})
         return result
 
     def score_detector(self, rows, model_config, channels=None):
-        from models.detectors.channel_payloads import channel_payloads
-        from experiments.side_tests.layer2_input_ablation import aggregate_windows, unwrap_json
+        from research_runner.implementation.detectors.channel_payloads import channel_payloads
+        from research_runner.implementation.detectors.windowing import aggregate_windows, unwrap_json
 
         spec = _classifier_spec(model_config)
-        threshold = _number(spec.get("threshold", spec.get("threshold_reference", .5)), "L2 threshold", 0, 1)
+        threshold = _number(spec.get("threshold", spec.get("threshold_reference", .5)), "Screen threshold", 0, 1)
         if isinstance(channels, str):
             channels = [channels]
         allowed = set(CHANNELS.values()) if channels is None else set()
@@ -446,30 +446,30 @@ class RealBackend:
                            check=True, timeout=runtime.get("training_timeout_seconds"))
             return _read_json(destination)
 
-    def infer_l3(self, requests, backend_config=None):
-        """Run only in the isolated L3 worker; no implicit interpreter fallback."""
-        cfg = {**self.config.get("models", {}).get("l3", {}), **(backend_config or {})}
-        cfg = _l3_config(cfg)
+    def infer_audit(self, requests, backend_config=None):
+        """Run only in the isolated Audit worker; no implicit interpreter fallback."""
+        cfg = {**self.config.get("models", {}).get("audit", {}), **(backend_config or {})}
+        cfg = _audit_config(cfg)
         requests = list(requests)
         ids = [item["request_id"] for item in requests]
         if len(set(ids)) != len(ids) or any(not isinstance(item["payload"], str) for item in requests):
-            raise ValueError("L3 requires unique request IDs and string payloads")
+            raise ValueError("Audit requires unique request IDs and string payloads")
         if not requests:
             return []
-        if self._l1 or self._scorers:
+        if self._gate or self._scorers:
             self._release_ml()
         if cfg["backend"] == "vllm":
             return self._infer_vllm(requests, cfg)
-        return [_infer_http(item, cfg) for item in iterable(requests, "l3_requests", unit="requests")]
+        return [_infer_http(item, cfg) for item in iterable(requests, "audit_requests", unit="requests")]
 
     def _infer_vllm(self, requests, cfg):
         batch_size = cfg["batch_size"]
         result = []
-        emit("l3_requests", 0, len(requests), unit="requests", force=True)
-        for start in iterable(range(0, len(requests), batch_size), "l3_batches", unit="batches"):
+        emit("audit_requests", 0, len(requests), unit="requests", force=True)
+        for start in iterable(range(0, len(requests), batch_size), "audit_batches", unit="batches"):
             result.extend(self._infer_vllm_batch(requests[start:start + batch_size], cfg))
-            emit("l3_requests", len(result), len(requests), unit="requests")
-        emit("l3_requests", len(result), len(requests), unit="requests", status="completed", force=True)
+            emit("audit_requests", len(result), len(requests), unit="requests")
+        emit("audit_requests", len(result), len(requests), unit="requests", status="completed", force=True)
         return result
 
     def _infer_vllm_batch(self, requests, cfg):
@@ -484,22 +484,22 @@ class RealBackend:
                     tokenize=False, add_generation_prompt=True) for item in requests]
                 lengths = [len(tokenizer.encode(text, add_special_tokens=False)) for text in texts]
                 if any(length + cfg["max_tokens"] > cfg["max_model_len"] for length in lengths):
-                    raise ValueError("L3 context budget exceeded; no silent truncation")
+                    raise ValueError("Audit context budget exceeded; no silent truncation")
                 outputs = list(llm.generate(texts, params, use_tqdm=False))
                 if len(outputs) != len(requests):
-                    raise ValueError("L3 returned a different number of outputs")
+                    raise ValueError("Audit returned a different number of outputs")
         except Exception as exc:
             seconds = 0. if started is None else (time.perf_counter() - started) / len(requests)
-            return [_l3_error(item, exc, seconds) for item in requests]
+            return [_audit_error(item, exc, seconds) for item in requests]
         seconds = (time.perf_counter() - started) / len(requests)
         result = []
         for item, output in zip(requests, outputs):
             try:
                 completion = output.outputs[0]
-                result.append(_l3_result(item, completion.text, completion.finish_reason, cfg, seconds,
+                result.append(_audit_result(item, completion.text, completion.finish_reason, cfg, seconds,
                                          len(output.prompt_token_ids), len(completion.token_ids)))
             except Exception as exc:
-                result.append(_l3_error(item, exc, seconds))
+                result.append(_audit_error(item, exc, seconds))
         return result
 
     def _vllm(self, cfg):
@@ -510,9 +510,9 @@ class RealBackend:
                   "max_num_batched_tokens", "seed")
         key = tuple(cfg[field] for field in fields) + (cfg.get("path"), cfg.get("checkpoint_sha256"))
         if self._llm is not None and key != self._llm_key:
-            raise ValueError("Use a new L3 worker for a different engine configuration")
+            raise ValueError("Use a new Audit worker for a different engine configuration")
         if self._llm is None:
-            emit("l3_model_load", 0, 1, unit="models", force=True)
+            emit("audit_model_load", 0, 1, unit="models", force=True)
             path = _snapshot(cfg["model"], cfg["revision"], cfg.get("path"), cfg.get("checkpoint_sha256"))
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
             self._llm = LLM(model=path, dtype=cfg["dtype"], tensor_parallel_size=1,
@@ -520,7 +520,7 @@ class RealBackend:
                             max_num_seqs=cfg["max_num_seqs"], max_num_batched_tokens=cfg["max_num_batched_tokens"],
                             enable_prefix_caching=True, enable_chunked_prefill=True, seed=cfg["seed"])
             self._llm_key = key
-            emit("l3_model_load", 1, 1, unit="models", status="completed", force=True)
+            emit("audit_model_load", 1, 1, unit="models", status="completed", force=True)
         params = SamplingParams(temperature=cfg["temperature"], max_tokens=cfg["max_tokens"], seed=cfg["seed"],
                                 guided_decoding=GuidedDecodingParams(json=cfg["schema"]))
         return self._llm, params
@@ -530,45 +530,45 @@ class RealBackend:
         return _score_rag(rows, train_rows, cfg, self._device())
 
 
-def _l3_config(config):
+def _audit_config(config):
     config = dict(config)
     if any(key in config for key in ("api_key", "token", "authorization")):
-        raise ValueError("L3 credentials must come from api_key_env, never configuration")
+        raise ValueError("Audit credentials must come from api_key_env, never configuration")
     prompt = config.get("prompt", config.get("system_prompt"))
     if not isinstance(prompt, str):
-        raise ValueError("L3 requires an inline prompt/system_prompt string")
+        raise ValueError("Audit requires an inline prompt/system_prompt string")
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     if digest != SYSTEM_PROMPT_SHA256 or config.get("system_prompt_sha256", digest) != digest:
-        raise ValueError("L3 prompt must exactly match the frozen authorization-audit prompt")
+        raise ValueError("Audit prompt must exactly match the frozen authorization-audit prompt")
     if "prompt" in config and "system_prompt" in config and config["prompt"] != config["system_prompt"]:
-        raise ValueError("Conflicting L3 prompt fields")
+        raise ValueError("Conflicting Audit prompt fields")
     properties = {key: {"type": "boolean"} for key in BOOL_KEYS}
     properties.update({key: {"type": "string"} for key in ("user_intent", "evidence_span", "reason")})
     properties["confidence"] = {"type": "number", "minimum": 0, "maximum": 1}
     schema = {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
     supplied_schema = config.get("schema")
     if not isinstance(supplied_schema, dict) or set(supplied_schema) != set(schema):
-        raise ValueError("L3 requires the inline frozen authorization-audit schema")
+        raise ValueError("Audit requires the inline frozen authorization-audit schema")
     if (supplied_schema["properties"] != properties or supplied_schema["type"] != "object"
             or supplied_schema["additionalProperties"] is not False
             or not isinstance(supplied_schema["required"], list)
             or sorted(supplied_schema["required"]) != sorted(properties)):
-        raise ValueError("L3 schema must exactly match the frozen authorization-audit schema")
+        raise ValueError("Audit schema must exactly match the frozen authorization-audit schema")
     required = ("backend", "model", "revision", "dtype", "temperature", "seed", "max_tokens", "threshold")
     if config.get("backend") == "vllm":
         required += ("max_model_len", "max_num_seqs", "max_num_batched_tokens", "gpu_memory_utilization")
     missing = [key for key in required if key not in config]
     if missing:
-        raise ValueError("L3 inline configuration missing: " + ", ".join(missing))
+        raise ValueError("Audit inline configuration missing: " + ", ".join(missing))
     cfg = {**config, "system_prompt": prompt, "schema": supplied_schema}
     if cfg["backend"] not in {"vllm", "openai-compatible", "openai_compatible"}:
-        raise ValueError(f"Unsupported L3 backend: {cfg['backend']}")
+        raise ValueError(f"Unsupported Audit backend: {cfg['backend']}")
     if cfg["backend"] == "vllm":
         if not re.fullmatch(r"[a-f0-9]{40}", str(cfg["revision"])):
             raise ValueError("vLLM requires an immutable model revision")
-        if cfg["model"] == L3_MODEL and cfg["revision"] != L3_REVISION:
+        if cfg["model"] == AUDIT_MODEL and cfg["revision"] != AUDIT_REVISION:
             raise ValueError("The primary Llama model must use its frozen revision")
-    cfg["threshold"] = _number(cfg["threshold"], "L3 threshold", 0, 1)
+    cfg["threshold"] = _number(cfg["threshold"], "Audit threshold", 0, 1)
     cfg["temperature"] = _number(cfg["temperature"], "temperature", 0, 0)
     if cfg["backend"] == "vllm":
         cfg["gpu_memory_utilization"] = _number(cfg["gpu_memory_utilization"], "gpu_memory_utilization", .001, 1)
@@ -577,9 +577,9 @@ def _l3_config(config):
             continue
         cfg[key] = _integer(cfg[key], key)
     cfg["seed"] = _integer(cfg["seed"], "seed", 0)
-    cfg["batch_size"] = _integer(cfg.get("batch_size", 64), "L3 batch_size")
+    cfg["batch_size"] = _integer(cfg.get("batch_size", 64), "Audit batch_size")
     if cfg["dtype"] not in {"bfloat16", "float16", "float32"}:
-        raise ValueError("Unsupported L3 dtype")
+        raise ValueError("Unsupported Audit dtype")
     if cfg["backend"] != "vllm":
         url = urlsplit(cfg.get("base_url", ""))
         if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
@@ -591,19 +591,19 @@ def _l3_config(config):
     return cfg
 
 
-def _l3_result(item, text, finish_reason, cfg, seconds, prompt_tokens=None, completion_tokens=None):
+def _audit_result(item, text, finish_reason, cfg, seconds, prompt_tokens=None, completion_tokens=None):
     if finish_reason != "stop":
-        raise ValueError("L3 completion did not stop normally; refusing a truncated/filtered verdict")
+        raise ValueError("Audit completion did not stop normally; refusing a truncated/filtered verdict")
     verdict = json.loads(text)
     if not isinstance(verdict, dict) or set(verdict) != set(cfg["schema"]["properties"]):
-        raise ValueError("Invalid L3 verdict keys")
+        raise ValueError("Invalid Audit verdict keys")
     if any(type(verdict[key]) is not bool for key in BOOL_KEYS):
-        raise ValueError("L3 verdict branches must be booleans")
+        raise ValueError("Audit verdict branches must be booleans")
     if any(not isinstance(verdict[key], str) for key in ("user_intent", "evidence_span", "reason")):
-        raise ValueError("L3 verdict text fields must be strings")
+        raise ValueError("Audit verdict text fields must be strings")
     if type(verdict["confidence"]) not in {int, float}:
-        raise ValueError("L3 confidence must be numeric")
-    score = _number(verdict["confidence"], "L3 confidence", 0, 1)
+        raise ValueError("Audit confidence must be numeric")
+    score = _number(verdict["confidence"], "Audit confidence", 0, 1)
     # Exactly the decision rule in experiments/side_tests/vllm_layer3/run.py.
     prediction = int(any(verdict[key] for key in BOOL_KEYS) and score >= cfg["threshold"])
     tokens = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -615,9 +615,9 @@ def _l3_result(item, text, finish_reason, cfg, seconds, prompt_tokens=None, comp
             "timing_scope": "amortized_batch_excluding_model_load" if cfg["backend"] == "vllm" else "request_including_retries"}
 
 
-def _l3_error(item, exc, seconds):
+def _audit_error(item, exc, seconds):
     # Never serialize API exception bodies: they can contain credentials or input.
-    message = str(exc) if type(exc) is ValueError else "L3 inference failed; no verdict produced"
+    message = str(exc) if type(exc) is ValueError else "Audit inference failed; no verdict produced"
     error = {"type": type(exc).__name__, "message": message}
     return {"request_id": item["request_id"], "payload_sha256": hashlib.sha256(item["payload"].encode()).hexdigest(),
             "prediction": None, "score": None, "verdict": None, "seconds": seconds,
@@ -631,7 +631,7 @@ def _infer_http(item, cfg):
     name = cfg.get("api_key_env", "OPENAI_API_KEY")
     token = os.environ.get(name) if name else None
     if name and not token:
-        raise ValueError("Configured L3 API credential environment variable is missing")
+        raise ValueError("Configured Audit API credential environment variable is missing")
     body = {"model": cfg["model"], "messages": [{"role": "system", "content": cfg["system_prompt"]},
             {"role": "user", "content": item["payload"]}], "temperature": cfg["temperature"],
             "max_tokens": cfg["max_tokens"], "seed": cfg["seed"],
@@ -645,7 +645,7 @@ def _infer_http(item, cfg):
         endpoint += "/chat/completions"
     request = urllib_request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method="POST")
     for attempt in range(cfg["max_retries"]):
-        emit("l3_http_attempts", attempt, cfg["max_retries"], unit="attempts", force=True)
+        emit("audit_http_attempts", attempt, cfg["max_retries"], unit="attempts", force=True)
         try:
             # Do not forward bearer credentials to a redirected host.
             opener = urllib_request.build_opener(_NoRedirect())
@@ -653,14 +653,14 @@ def _infer_http(item, cfg):
                 data = json.load(response)
             choice = data["choices"][0]
             usage = data.get("usage") or {}
-            emit("l3_http_attempts", attempt + 1, cfg["max_retries"], unit="attempts", status="completed", force=True)
-            return _l3_result(item, choice["message"]["content"], choice.get("finish_reason"), cfg,
+            emit("audit_http_attempts", attempt + 1, cfg["max_retries"], unit="attempts", status="completed", force=True)
+            return _audit_result(item, choice["message"]["content"], choice.get("finish_reason"), cfg,
                               time.perf_counter() - started, usage.get("prompt_tokens"), usage.get("completion_tokens"))
         except Exception as exc:
-            emit("l3_http_attempts", attempt + 1, cfg["max_retries"], unit="attempts",
+            emit("audit_http_attempts", attempt + 1, cfg["max_retries"], unit="attempts",
                  status="failed" if attempt + 1 == cfg["max_retries"] else "running", force=True)
             if attempt + 1 == cfg["max_retries"]:
-                return _l3_error(item, exc, time.perf_counter() - started)
+                return _audit_error(item, exc, time.perf_counter() - started)
             time.sleep(attempt + 1)
 
 
@@ -709,8 +709,8 @@ def _training_recipe(config):
             recipe[key] = _integer(recipe[key], key)
         recipe["learning_rate"] = _number(recipe["learning_rate"], "learning_rate", 1e-15)
     calibration = config.get("training", {}).get("calibration", {})
-    _number(calibration.get("l1_recall_floor", .98), "l1_recall_floor", 0, 1)
-    recall = _number(calibration.get("ae_selection_recall_floor", calibration.get("l1_recall_floor", .98)),
+    _number(calibration.get("gate_recall_floor", .98), "gate_recall_floor", 0, 1)
+    recall = _number(calibration.get("ae_selection_recall_floor", calibration.get("gate_recall_floor", .98)),
                      "ae_selection_recall_floor", 0, 1)
     return encoder, ae, recall
 
@@ -723,10 +723,10 @@ def _train_worker(config, seed, output):
     """
     from unittest.mock import patch
     import torch
-    from config import config as legacy
-    from data import data_preprocess, prepare_training
-    from training import autoencoder_training, layer1_common, modernbert_finetune
-    from training.layer1_pipeline import gpu_preflight, verify_runtime
+    from research_runner.implementation.training import settings as training_settings
+    from research_runner.implementation.data import data_preprocess, prepare_training
+    from research_runner.implementation.training import autoencoder_training, gate_common, modernbert_finetune
+    from research_runner.implementation.training.gate_runtime import gpu_preflight, verify_runtime
 
     encoder, ae, recall = _training_recipe(config)
     prepared = Path(config["data"]["_prepared_root"]).resolve()
@@ -756,11 +756,11 @@ def _train_worker(config, seed, output):
         return original_hash(prepared / "manifest.json" if Path(path) == legacy_manifest else path)
 
     # All overrides are process-local, scoped, and restored even on failure.
-    with patch.object(legacy, "ModernBERTConfig", lambda: SimpleNamespace(**encoder_settings)), \
-         patch.object(legacy, "AutoEncoderConfig", lambda: SimpleNamespace(**ae_settings)), \
+    with patch.object(training_settings, "ModernBERTConfig", lambda: SimpleNamespace(**encoder_settings)), \
+         patch.object(training_settings, "AutoEncoderConfig", lambda: SimpleNamespace(**ae_settings)), \
          patch.object(prepare_training, "load_prepared", load), \
          patch.object(data_preprocess, "sha256", provenance_hash), \
-         patch.object(layer1_common, "sha256", provenance_hash):
+         patch.object(gate_common, "sha256", provenance_hash):
         modernbert_finetune.run(100, output_dir=output / "smoke", smoke=True, seed=seed)
         gc.collect()
         torch.cuda.empty_cache()
@@ -776,10 +776,10 @@ def _train_worker(config, seed, output):
     import numpy as np
     validation = original_load("encoder", "val", output_dir=prepared)
     errors = np.load(Path(metadata["ae_path"]).parent / "validation_errors.npy")
-    operational_recall = config.get("training", {}).get("calibration", {}).get("l1_recall_floor", recall)
-    operational = layer1_common.calibrate([row["label"] for row in validation], errors, operational_recall)
-    metadata["l1_threshold"] = operational["threshold"]
-    metadata["l1_calibration"] = operational
+    operational_recall = config.get("training", {}).get("calibration", {}).get("gate_recall_floor", recall)
+    operational = gate_common.calibrate([row["label"] for row in validation], errors, operational_recall)
+    metadata["gate_threshold"] = operational["threshold"]
+    metadata["gate_calibration"] = operational
     (output / "operational_calibration.json").write_text(json.dumps(operational, indent=2), encoding="utf-8")
     metadata.update(seed=seed, selection_path=str(selection_path), selection_source="validation_only",
                     test_used_for_selection=False, prepared_root=str(prepared),
@@ -810,7 +810,7 @@ def _rag_sample(row):
         return row
     if "sequence" not in row:
         raise ValueError("RAGuard requires reasoning_steps or a serialized sequence")
-    from models.detectors.channel_payloads import channel_payloads
+    from research_runner.implementation.detectors.channel_payloads import channel_payloads
     parts = channel_payloads(row["sequence"])
     prompt = "\n\n".join(text for channel, text in parts if channel == "prompt")
     docs = [text for channel, text in parts if channel == "retrieval"]
@@ -844,7 +844,7 @@ def _score_rag(rows, train_rows, cfg, device):
         if not re.fullmatch(r"[a-f0-9]{40}", spec["revision"]):
             raise ValueError("RAGuard model revisions must be immutable commit hashes")
     with _offline():
-        from models.baseline.raguard import RAGuardDetector
+        from research_runner.implementation.baselines.raguard import RAGuardDetector
         emit("rag_model_load", 0, 1, unit="models", force=True)
         path = _snapshot(model["model"], model["revision"], model.get("path"), model.get("checkpoint_sha256"))
         embed_path = _snapshot(embedding["model"], embedding["revision"], embedding.get("path"), embedding.get("checkpoint_sha256")) if use_ts else ""
