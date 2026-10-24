@@ -28,6 +28,9 @@ def run_selection(runner, choice, *, input_fn=input, print_fn=print):
     except ExistingResultsError as exc:
         print_fn(str(exc))
         if input_fn('Existing results found. Overwrite this experiment\'s results? [y/N] ').strip().lower() not in {'y', 'yes'}:
+            cancel = getattr(runner, 'cancel', None)
+            if callable(cancel):
+                cancel(item)
             print_fn('Cancelled. Existing results are unchanged.')
             return None
         result = runner.run(item, overwrite=True)

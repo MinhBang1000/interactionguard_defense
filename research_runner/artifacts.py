@@ -22,6 +22,7 @@ import uuid
 import zipfile
 
 from .config import is_secret_key
+from .progress import emit, iterable
 
 
 class ArtifactError(ValueError):
@@ -54,9 +55,20 @@ def fingerprint(value: Any) -> str:
 
 def file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    path = Path(path)
+    size = path.stat().st_size
+    large = size >= 8 * 1024 * 1024
+    count = 0
+    if large:
+        emit('hash.file', 0, size, unit='bytes', message=str(path), force=True)
+    with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            count += len(chunk)
+            if large:
+                emit('hash.file', count, size, unit='bytes', message=str(path))
+    if large:
+        emit('hash.file', count, size, unit='bytes', message=str(path), status='completed', force=True)
     return digest.hexdigest()
 
 
@@ -183,6 +195,7 @@ def _safe_relative(value: str) -> PurePosixPath:
 
 def _files(directory: Path) -> dict[str, str]:
     result = {}
+    emit('artifact.hashes', 0, message=f'Hashing/validating files: {directory}', unit='files', force=True)
     for parent, directories, files in os.walk(directory, followlinks=False):
         for name in sorted(directories + files):
             path = Path(parent) / name
@@ -196,6 +209,8 @@ def _files(directory: Path) -> dict[str, str]:
                 raise ArtifactError(f"Artifact is not a regular file: {relative}")
             if relative != "manifest.json":
                 result[relative] = file_sha256(path)
+                emit('artifact.hashes', len(result), message=f'{directory.name}: {relative}', unit='files')
+    emit('artifact.hashes', len(result), unit='files', message=str(directory), status='completed', force=True)
     return result
 
 
@@ -339,6 +354,7 @@ class ArtifactStore:
         try:
             completed = self.ensure(name, signature, overwrite=overwrite, resume=resume)
             if completed is not None:
+                emit('artifact.resume', message=f'Using verified completed artifact: {name}', force=True)
                 yield completed
                 self.load(name, signature)
                 return
@@ -348,6 +364,7 @@ class ArtifactStore:
             if stage.is_symlink() or not stage.is_dir():
                 raise ArtifactError("Staging directory was replaced or removed")
             write_json(stage / "effective_config.json", _public_config(self.config))
+            emit('artifact.publish', message=f'Verifying and atomically publishing {name}.', force=True)
             files = _files(stage)
             if (stage / "manifest.json").exists():
                 raise ArtifactError("manifest.json is reserved for the artifact store")
@@ -374,6 +391,7 @@ class ArtifactStore:
                     previous = None
                 raise
             stage = None
+            emit('artifact.publish', status='completed', message=f'Published {name}.', force=True)
             if previous is not None:
                 # Publication succeeded; cleanup must not turn success into failure.
                 if previous.is_dir():
@@ -401,7 +419,7 @@ class ArtifactStore:
 _EXCLUDED_PARTS = {".git", ".env", ".aws", ".ssh", ".cache", "cache", "caches",
                    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
                    ".venv", "venv", "env", "envs", "node_modules", "secrets",
-                   "secret", "credentials", ".staging", ".locks"}
+                   "secret", "credentials", ".staging", ".locks", ".progress"}
 
 
 def _excluded(relative: PurePosixPath, patterns: list[str]) -> bool:
@@ -483,6 +501,8 @@ def create_backup(config: dict, *, results_root: str | Path | None = None) -> Pa
     os.close(descriptor)
     temporary = Path(temporary)
     checksums = {}
+    emit('backup.scan', message='Scanning configured sources; excluding live progress, secrets and nested ZIPs.', force=True)
+    emit('backup.files', 0, unit='files', force=True)
 
     def add(archive: zipfile.ZipFile, source: Path, arcname: str) -> None:
         relative = _safe_relative(arcname)
@@ -502,11 +522,21 @@ def create_backup(config: dict, *, results_root: str | Path | None = None) -> Pa
         if arcname in checksums:
             raise ArtifactError(f"Duplicate archive path: {arcname}")
         digest = hashlib.sha256()
+        size, copied = source.stat().st_size, 0
+        large = size >= 8 * 1024 * 1024
+        if large:
+            emit('backup.copy', 0, size, unit='bytes', message=arcname, force=True)
         with source.open("rb") as handle, archive.open(arcname, "w", force_zip64=True) as member:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
                 member.write(chunk)
+                copied += len(chunk)
+                if large:
+                    emit('backup.copy', copied, size, unit='bytes', message=arcname)
+        if large:
+            emit('backup.copy', copied, size, unit='bytes', message=arcname, status='completed', force=True)
         checksums[arcname] = digest.hexdigest()
+        emit('backup.files', len(checksums), unit='files', message=arcname)
 
     try:
         with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
@@ -540,6 +570,7 @@ def create_backup(config: dict, *, results_root: str | Path | None = None) -> Pa
                     raise ArtifactError("Source YAML could not be safely archived")
             archive.writestr("checksums.json", _json_bytes({"version": 1, "files": checksums}) + b"\n")
         with zipfile.ZipFile(temporary) as archive:
+            emit('backup.crc', message='Checking ZIP CRC integrity.', force=True)
             if archive.testzip() is not None:
                 raise ArtifactError("Backup CRC verification failed")
             manifest = json.loads(archive.read("checksums.json"))
@@ -547,16 +578,24 @@ def create_backup(config: dict, *, results_root: str | Path | None = None) -> Pa
                 raise ArtifactError("Backup checksum manifest differs")
             if set(archive.namelist()) != set(checksums) | {"checksums.json"}:
                 raise ArtifactError("Backup has unmanifested members")
-            for name, expected in checksums.items():
+            for name, expected in iterable(checksums.items(), 'backup.verify', unit='files'):
                 digest = hashlib.sha256()
+                size, verified = archive.getinfo(name).file_size, 0
+                large = size >= 8 * 1024 * 1024
+                if large:
+                    emit('backup.verify_bytes', 0, size, unit='bytes', message=name, force=True)
                 with archive.open(name) as member:
                     for chunk in iter(lambda: member.read(1024 * 1024), b""):
                         digest.update(chunk)
+                        verified += len(chunk)
+                        if large:
+                            emit('backup.verify_bytes', verified, size, unit='bytes', message=name)
                 if digest.hexdigest() != expected:
                     raise ArtifactError(f"Backup checksum mismatch: {name}")
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
+        emit('backup.publish', status='completed', message=str(destination), force=True)
         return destination
     finally:
         temporary.unlink(missing_ok=True)

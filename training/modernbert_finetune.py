@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import time
 
+from research_runner.progress import emit, trainer_callback
+
 
 def configure_loss_normalization(model):
     # ModernBERT's mean CE does not consume num_items_in_batch (Transformers 5).
@@ -19,7 +21,7 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
     from datasets import Dataset
     from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                               DataCollatorWithPadding, EarlyStoppingCallback, Trainer,
-                              TrainingArguments, set_seed)
+                              TrainingArguments, TrainerCallback, set_seed)
     from config.config import ModernBERTConfig
     from data.data_preprocess import ROOT, sha256, write_json
     from data.prepare_training import load_prepared
@@ -43,6 +45,7 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
     val = load_prepared("encoder", "val", output_dir=config.DATA_DIR.parent)
     order = np.random.default_rng(run_seed).permutation(len(train))
     train = [train[i] for i in order[:max(1, int(len(train)*ratio))]]
+    emit('encoder.tokenizer', message=f'Loading tokenizer; seed={run_seed}.', force=True)
     tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME, local_files_only=True)
     tokenizer.padding_side, tokenizer.truncation_side = "right", "right"
     settings = {"model_name": config.MODEL_NAME, "max_length": config.MAX_LENGTH,
@@ -73,7 +76,12 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
                                                     max_length=config.MAX_LENGTH),
                         batched=True, remove_columns=["text"])
 
-    train_ds, val_ds = dataset(train), dataset(val)
+    emit('encoder.tokenization', 0, 2, unit='splits', message=f'Train={len(train)}; validation={len(val)}.', force=True)
+    train_ds = dataset(train)
+    emit('encoder.tokenization', 1, 2, unit='splits', force=True)
+    val_ds = dataset(val)
+    emit('encoder.tokenization', 2, 2, unit='splits', status='completed', force=True)
+    emit('encoder.model_load', message='Loading ModernBERT weights.', force=True)
     model = AutoModelForSequenceClassification.from_pretrained(
         config.MODEL_NAME, num_labels=2, local_files_only=True,
         classifier_pooling="cls", reference_compile=False, attn_implementation="sdpa")
@@ -82,6 +90,7 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
     configure_loss_normalization(model)
     collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
     if smoke:
+        emit('encoder.smoke', message='Testing forward/backward at the longest training sequence.', force=True)
         model.to("cuda:0").train()
         model.gradient_checkpointing_enable()
         index = max(range(len(train_ds)), key=lambda i: len(train_ds[i]["input_ids"]))
@@ -99,6 +108,7 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
                   "status": "forward_backward_passed"}
         write_json(output / "smoke_test.json", report)
         print(report, flush=True)
+        emit('encoder.smoke', status='completed', message='Forward/backward smoke test passed.', force=True)
         return report
 
     def compute_metrics(prediction):
@@ -120,9 +130,11 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
         dataloader_pin_memory=True, disable_tqdm=True)
     trainer = Trainer(model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds,
                       processing_class=tokenizer, data_collator=collator, compute_metrics=compute_metrics,
-                      callbacks=[EarlyStoppingCallback(early_stopping_patience=config.EARLY_STOP_PATIENCE)])
+                      callbacks=[EarlyStoppingCallback(early_stopping_patience=config.EARLY_STOP_PATIENCE),
+                                 trainer_callback(TrainerCallback)])
     trainer.train()
     validation = trainer.evaluate()
+    emit('encoder.save', message='Saving selected encoder, tokenizer and training history.', force=True)
     trainer.save_model(output)
     tokenizer.save_pretrained(output)
     settings.update({"finished_at_utc": timestamp(), "validation": validation,
@@ -135,6 +147,7 @@ def run(train_percent=None, *, output_dir=None, smoke=False, seed=None):
     write_json(output / "training_config.json", settings)
     write_json(output / "training_history.json", {"log_history": trainer.state.log_history})
     print(f"ENCODER COMPLETE {output}; validation={validation}", flush=True)
+    emit('encoder.save', status='completed', message=str(output), force=True)
     return settings
 
 

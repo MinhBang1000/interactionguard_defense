@@ -161,6 +161,9 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(report["provenance"]["traces_path"], str(final / "splits/test.jsonl"))
         final.parent.mkdir(parents=True)
         self.output.rename(final)
+        for relative, meta in manifest['artifacts'].items():
+            self.assertEqual(sha256(final / relative), meta['sha256'])
+            self.assertEqual((final / relative).stat().st_size, meta['bytes'])
         for stage in ("encoder", "autoencoder"):
             for name in ("train", "val"):
                 self.assertTrue(load_prepared(stage, name, output_dir=final / "training"))
@@ -230,7 +233,9 @@ class DatasetTests(unittest.TestCase):
         write_jsonl(self.reviews, [self._review()])
         before = self._snapshot()
 
-        def fake_run(command, *, cwd, check, env):
+        def fake_run(command, *, cwd, check, env, stdout, stderr):
+            self.assertEqual(stderr, subprocess.STDOUT)
+            self.assertTrue(stdout.writable())
             self.assertEqual(command[0], sys.executable)
             self.assertEqual(command[1:3], ["-m", "eval.prompt_success_judge"])
             self.assertEqual(cwd, Path(self.config["paths"]["workspace"]))

@@ -183,6 +183,11 @@ class EngineTests(unittest.TestCase):
         return {str(path.relative_to(self.workspace)): file_sha256(path)
                 for directory in self.originals for path in directory.rglob("*") if path.is_file()}
 
+    def snapshot_artifacts(self):
+        return {str(path.relative_to(self.results)): file_sha256(path)
+                for path in self.results.rglob('*')
+                if path.is_file() and '.progress' not in path.relative_to(self.results).parts}
+
     def prepare(self, training=False, full=False):
         self.runner.run(0)
         if training or full:
@@ -197,6 +202,34 @@ class EngineTests(unittest.TestCase):
         for relative, digest in manifest["files"].items():
             self.assertEqual(file_sha256(path / relative), digest)
         return path
+
+    def verify_dataset_metadata(self, directory):
+        report = read_json(directory / 'dataset_report.json')
+        self.assertEqual(report, read_json(directory / 'dataset_manifest.json'))
+        for relative, meta in report['artifacts'].items():
+            path = directory / relative
+            with self.subTest(dataset_file=relative):
+                self.assertEqual(file_sha256(path), meta['sha256'])
+                self.assertEqual(path.stat().st_size, meta['bytes'])
+                if path.suffix == '.jsonl':
+                    self.assertEqual(len(read_jsonl(path)), meta['rows'])
+        self.assertEqual(report['output'], str(directory))
+        self.assertEqual(read_json(directory / 'splits/split_manifest.json')['source_dir'],
+                         str(directory / 'annotated'))
+        self.assertEqual(read_json(directory / 'asr/test_baseline_asr_v3.json')['provenance']['traces_path'],
+                         str(directory / 'splits/test.jsonl'))
+        from data.prepare_training import load_prepared
+        for stage in ('encoder', 'autoencoder'):
+            for split in ('train', 'val'):
+                self.assertTrue(load_prepared(stage, split, output_dir=directory / 'training'))
+        for split, source in read_json(directory / 'training/manifest.json')['sources'].items():
+            self.assertEqual(source['path'], str(directory / f'processed/{split}_processed.jsonl'))
+        for path in directory.rglob('*.json'):
+            self.assertNotIn(str(self.results / '.staging') + '/', path.read_text())
+
+    def test_dataset_publication_keeps_nested_hashes_bytes_and_final_paths_consistent(self):
+        self.runner.run(0)
+        self.verify_dataset_metadata(self.verify_artifact('dataset'))
 
     def verify_report(self, directory, expected_ids=None, episode_level=True):
         decisions = read_jsonl(directory / "prefix_decisions.jsonl")
@@ -228,6 +261,7 @@ class EngineTests(unittest.TestCase):
     def test_menu_zero_through_eight_complete_campaign(self):
         self.prepare(training=True)
         dataset = self.verify_artifact("dataset")
+        self.verify_dataset_metadata(dataset)
         training = self.verify_artifact("training")
         self.assertEqual(read_json(dataset / "splits/split_manifest.json")["episode_ids"], self.members)
         checkpoints = read_json(training / "checkpoints.json")
@@ -279,8 +313,15 @@ class EngineTests(unittest.TestCase):
         self.verify_thresholds()
         self.verify_benign_workloads(set(ids))
         archive_path = self.runner.run(8)
+        for name in ('dataset', 'training', 'configuration', 'baselines', 'channel_ablation',
+                     'backend', 'threshold', 'benign', 'backup'):
+            progress_root = self.results / '.progress' / name
+            status = read_json(progress_root / 'progress.json')
+            self.assertEqual(status['status'], 'completed', name)
+            self.assertTrue(read_jsonl(progress_root / 'progress.jsonl'))
         with zipfile.ZipFile(archive_path) as archive:
             self.assertIsNone(archive.testzip())
+            self.assertFalse(any('.progress' in name.split('/') for name in archive.namelist()))
             checksums = json.loads(archive.read("checksums.json"))["files"]
             self.assertIn("results/configuration_stage2/manifest.json", checksums)
             self.assertIn("effective_config.json", checksums)
@@ -342,6 +383,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(report["l1"]["objective"], "max_validation_f1_subject_to_recall_floor")
 
     def verify_benign_workloads(self, allowed_ids):
+        paired = {}
         for path in (self.results / "benign").rglob("workload.json"):
             report = read_json(path)
             ids = report["sample_ids"]
@@ -351,6 +393,71 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(report["actual_benign_ratio"], int(5 * report["requested_benign_ratio"]) / 5)
             self.assertEqual(report["profile"], "main")
             self.assertEqual(report["l1_threshold"], 0.5)
+            relative = path.relative_to(self.results / 'benign').parts
+            key = relative[:2]
+            identity = (report['sample_ids'], report['paired_workload_sha256'],
+                        report['sampling_seed'], report['l1_threshold'], report['l2_threshold'])
+            if key not in paired:
+                paired[key] = (identity, set())
+            self.assertEqual(paired[key][0], identity)
+            if 'configuration' in report:
+                order = report['configuration']
+                paired[key][1].add(order)
+                decisions = read_jsonl(path.parent / 'prefix_decisions.jsonl')
+                self.assertEqual([d['id'] for d in decisions], ids)
+                self.assertTrue(all(d['route'][0]['layer'] == order.split('-')[0] for d in decisions))
+                expected = sum(d['label'] == 0 and d['route'][0] == {'layer': 'L1', 'action': 'Forward'} for d in decisions)
+                self.assertEqual(report['benign_front_gate_forward_count'], expected)
+        for identity, configurations in paired.values():
+            self.assertEqual(configurations, set(self.config['experiments']['benign']['orders']))
+
+    def test_benign_sweep_pairs_orders_without_rescoring_or_retuning(self):
+        self.prepare(training=True)
+        self.runner.configuration_stage1()
+        settings = deepcopy(self.config)
+        before = len([c for c in self.executor.calls if c['operation'] in ('train', 'score')])
+        self.runner.run(7)
+        self.assertEqual(self.config, settings)
+        self.assertEqual(before, len([c for c in self.executor.calls if c['operation'] in ('train', 'score')]))
+        self.verify_benign_workloads({r['id'] for r in self.runner.rows()})
+        path = self.verify_artifact('benign')
+        summary = read_json(path / 'summary.json')
+        expected = {f'benign_{round(ratio*100)}/{order}'
+                    for ratio in settings['experiments']['benign']['ratios']
+                    for order in settings['experiments']['benign']['orders']}
+        self.assertEqual(set(summary), expected)
+        self.assertTrue(all(v['trials'] == len(settings['training']['seeds']) for v in summary.values()))
+        self.assertTrue(read_json(path / 'stage_complete.json')['paired_workloads_across_configurations'])
+
+    def test_explicit_upgrade_receipt_keeps_old_artifact_immutable_and_rejects_changes(self):
+        self.prepare()
+        directory = self.verify_artifact('dataset')
+        manifest_path = directory / 'manifest.json'
+        manifest = read_json(manifest_path)
+        expected = manifest['signature']
+        # Simulate a verified artifact from the pre-upgrade runner.
+        manifest['signature'] = 'pre-upgrade-signature'
+        write_json(manifest_path, manifest)
+        frozen = file_sha256(manifest_path)
+        receipt = {'version': 1, 'name': 'dataset', 'parents': [],
+                   'from_signature': manifest['signature'], 'to_signature': expected,
+                   'manifest_sha256': frozen}
+        path = self.results / '.compatibility/dataset.json'
+        write_json(path, receipt)
+        self.assertEqual(self.runner.compatible('dataset'), directory)
+        self.assertEqual(file_sha256(manifest_path), frozen)
+        changed = deepcopy(self.config)
+        changed['data']['reference_test_sha256'] = '0' * 64
+        with self.assertRaises(IncompatibleResultsError):
+            ResearchRunner(changed, executor=self.executor).compatible('dataset')
+        for key in ('from_signature', 'to_signature', 'manifest_sha256', 'name'):
+            write_json(path, {**receipt, key: 'wrong'})
+            with self.subTest(field=key), self.assertRaises(IncompatibleResultsError):
+                self.runner.compatible('dataset')
+        write_json(path, receipt)
+        (directory / 'processed/test_processed.jsonl').write_text('{}\n')
+        with self.assertRaises(ArtifactError):
+            self.runner.compatible('dataset')
 
     def test_real_config_keeps_l3_prompt_schema_and_payload_assets(self):
         original = load_config(CONFIG)
@@ -373,7 +480,7 @@ class EngineTests(unittest.TestCase):
             with self.subTest(menu=item), self.assertRaises((ValueError, FileNotFoundError)):
                 self.runner.run(item)
         self.assertFalse(self.executor.calls)
-        self.assertFalse(self.results.exists())
+        self.assertEqual({p.name for p in self.results.iterdir()}, {'.progress'})
         self.prepare()
         with self.assertRaises((ValueError, FileNotFoundError)):
             self.runner.run(2)
@@ -382,12 +489,12 @@ class EngineTests(unittest.TestCase):
 
     def test_overwrite_defaults_to_cancel_and_preserves_completed_artifacts(self):
         self.prepare(training=True)
-        before = {str(p.relative_to(self.results)): file_sha256(p) for p in self.results.rglob("*") if p.is_file()}
+        before = self.snapshot_artifacts()
         calls = len(self.executor.calls)
         for item in (0, 1):
             with self.subTest(menu=item), self.assertRaises(ExistingResultsError):
                 self.runner.run(item)
-        after = {str(p.relative_to(self.results)): file_sha256(p) for p in self.results.rglob("*") if p.is_file()}
+        after = self.snapshot_artifacts()
         self.assertEqual(before, after)
         self.assertEqual(len(self.executor.calls), calls)
 
@@ -405,7 +512,7 @@ class EngineTests(unittest.TestCase):
     def test_cli_overwrite_cancellation_preserves_real_results_and_never_restarts_workers(self):
         from research_runner.cli import run_selection
         self.prepare(training=True)
-        before = {str(p.relative_to(self.results)): file_sha256(p) for p in self.results.rglob("*") if p.is_file()}
+        before = self.snapshot_artifacts()
         calls = len(self.executor.calls)
         for answer in ("", "n", "no"):
             messages = []
@@ -415,16 +522,17 @@ class EngineTests(unittest.TestCase):
             self.assertIn("[y/N]", input_fn.call_args.args[0])
             self.assertTrue(any("Cancelled" in message for message in messages))
         self.assertEqual(len(self.executor.calls), calls)
-        self.assertEqual(before, {str(p.relative_to(self.results)): file_sha256(p) for p in self.results.rglob("*") if p.is_file()})
+        self.assertEqual(before, self.snapshot_artifacts())
+        self.assertEqual(read_json(self.results / '.progress/training/progress.json')['status'], 'cancelled')
 
     def test_resume_completed_configuration_is_read_only_and_does_not_rerun_workers(self):
         self.prepare(full=True)
         self.config["experiments"]["configuration"]["resume"] = True
-        before = {str(p.relative_to(self.results)): file_sha256(p) for p in self.results.rglob("*") if p.is_file()}
+        before = self.snapshot_artifacts()
         calls = len(self.executor.calls)
         self.runner.run(2)
         self.assertEqual(len(self.executor.calls), calls)
-        self.assertEqual(before, {str(p.relative_to(self.results)): file_sha256(p) for p in self.results.rglob("*") if p.is_file()})
+        self.assertEqual(before, self.snapshot_artifacts())
 
     def test_resume_rejects_artifact_with_wrong_identity(self):
         self.prepare(training=True)

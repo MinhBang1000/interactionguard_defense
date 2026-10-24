@@ -254,6 +254,13 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
     _keys(config["experiments"], _EXPERIMENTS, "experiments")
     for name, settings in config["experiments"].items():
         _settings(settings, f"experiments.{name}")
+        if name == 'benign':
+            if 'order' in settings and 'orders' in settings:
+                raise ConfigError('experiments.benign must specify order or orders, not both')
+            if 'orders' not in settings:
+                if 'order' not in settings:
+                    raise ConfigError('experiments.benign.orders is required')
+                settings['orders'] = [settings.pop('order')]
         if name == "configuration" and settings.get("terminal_policy") != "binary_at_own_threshold":
             raise ConfigError("experiments.configuration.terminal_policy must be binary_at_own_threshold")
         if name != "timing":

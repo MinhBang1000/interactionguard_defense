@@ -18,6 +18,8 @@ from eval.prompt_success_judge import reusable_record, apply_reviews, SYSTEM, PR
 
 
 def annotate_sources(data_dir, output_dir, judge_path):
+    from research_runner.progress import emit
+
     data_dir, output_dir, judge_path = Path(data_dir), Path(output_dir), Path(judge_path)
     judges = load_judges(judge_path)
     judge_hash = sha256(judge_path) if judge_path.exists() else None
@@ -36,6 +38,7 @@ def annotate_sources(data_dir, output_dir, judge_path):
         for filename, kind in SOURCES.items():
             source = data_dir/"raw"/filename
             rows, enriched = read_jsonl(source), []
+            emit("dataset.annotate." + filename, 0, len(rows), unit="episodes")
             for trace in rows:
                 if trace["id"] in ids:
                     raise ValueError("Duplicate raw episode ID")
@@ -48,6 +51,7 @@ def annotate_sources(data_dir, output_dir, judge_path):
                 if {k:v for k,v in result.items() if k != "asr_outcome"} != {k:v for k,v in trace.items() if k != "asr_outcome"}:
                     raise ValueError("Raw content changed")
                 enriched.append(result)
+                emit("dataset.annotate." + filename, len(enriched), len(rows), unit="episodes")
             write_jsonl(staging/filename, enriched)
             if read_jsonl(staging/filename) != enriched:
                 raise ValueError("Annotated file verification failed")
@@ -55,6 +59,8 @@ def annotate_sources(data_dir, output_dir, judge_path):
             manifest["annotated_sha256"][filename] = sha256(staging/filename)
             counts = Counter(x["asr_outcome"]["verdict"] for x in enriched)
             manifest["files"][filename] = {"episodes": len(rows), "counts": dict(counts)}
+            emit("dataset.annotate." + filename, len(rows), len(rows), unit="episodes",
+                 status="completed")
             print(f"Annotated {filename}: {len(rows)} {dict(counts)}", flush=True)
         manifest["unique_episodes"] = len(ids)
         write_json(staging/"manifest.json", manifest)

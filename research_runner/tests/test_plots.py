@@ -25,6 +25,25 @@ class PlotTests(unittest.TestCase):
             self.assertEqual(output['created'], ['comparison.png'])
             self.assertGreater((Path(temp) / 'comparison.png').stat().st_size, 1000)
 
+    @unittest.skipUnless(importlib.util.find_spec('matplotlib'), 'Optional matplotlib is not installed')
+    def test_paired_benign_comparison_and_per_order_traffic_plots(self):
+        summary = {}
+        for order in ('L1-L2-L3', 'L2-L1-L3'):
+            for ratio in (90, 98):
+                summary[f'benign_{ratio}/{order}'] = {'trials': 5, 'metrics': {
+                    'f1': {'mean': .85, 'std': .02},
+                    'estimated_pipeline_seconds_per_sample': {'mean': .2, 'std': .01}},
+                    'traffic': {layer: {'mean': .1, 'std': .01} for layer in ('L1', 'L2', 'L3')}}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'MPLCONFIGDIR': temp}):
+            result = render(summary, temp)
+            self.assertEqual(set(result['created']), {'comparison.png',
+                'L1-L2-L3/comparison.png', 'L2-L1-L3/comparison.png'})
+            for name in result['created']:
+                self.assertGreater((Path(temp) / name).stat().st_size, 1000)
+            summary.pop('benign_98/L2-L1-L3')
+            with self.assertRaisesRegex(ValueError, 'every configuration'):
+                render(summary, temp)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -26,6 +26,8 @@ from types import SimpleNamespace
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
 
+from research_runner.progress import emit, iterable, logged_process
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PROMPT_SHA256 = "638ae8020849f9631e65d4c262ffdb9f3a18cbb64ae55633acc85b2aa22ecb14"
@@ -264,6 +266,37 @@ def _release_gpu_cache():
         torch.cuda.empty_cache()
 
 
+@contextmanager
+def _forward_progress(model, phase, total=None, unit="sequences"):
+    """Observe existing forward batches without splitting/reordering model inputs."""
+    current = 0
+    emit(phase, 0, total, unit=unit, force=True)
+
+    def completed_batch(module, args, kwargs, output):
+        nonlocal current
+        inputs = kwargs.get("input_ids")
+        if inputs is None and args:
+            inputs = args[0]
+        if inputs is not None:
+            current += len(inputs)
+            emit(phase, current, total, unit=unit)
+
+    register = getattr(model, "register_forward_hook", None)
+    handle = register(completed_batch, with_kwargs=True) if callable(register) else None
+    try:
+        yield
+    except BaseException:
+        emit(phase, current, total, unit=unit, status="failed", force=True)
+        raise
+    else:
+        # Cache-only calls have no forwards; their known input count is complete.
+        final = current if total is None else total
+        emit(phase, final, final, unit=unit, status="completed", force=True)
+    finally:
+        if handle is not None:
+            handle.remove()
+
+
 class RealBackend:
     """Worker-facing adapter; construction and pure payload building are CPU-safe."""
 
@@ -300,13 +333,18 @@ class RealBackend:
         with _offline():
             if key not in self._l1:
                 self._release_ml()
+                emit("l1_model_load", 0, 1, unit="models", force=True)
                 self._l1[key] = _load_l1(checkpoint, self._device())
+                emit("l1_model_load", 1, 1, unit="models", status="completed", force=True)
             detector = self._l1[key]
             started = time.perf_counter()
             # Avoid legacy embedding-cache directories and cross-run cache reuse.
             with tempfile.TemporaryDirectory(prefix="research_l1_") as cache:
-                embeddings = detector.extract_embedding([row["sequence"] for row in rows], batch_size=1, cache_dir=cache)
+                with _forward_progress(getattr(detector, "embedding_model", None), "l1_embeddings", len(rows)):
+                    embeddings = detector.extract_embedding([row["sequence"] for row in rows], batch_size=1, cache_dir=cache)
+                emit("l1_reconstruction", 0, len(rows), unit="sequences", force=True)
                 errors = detector.compute_reconstruction_errors(embeddings)
+                emit("l1_reconstruction", len(rows), len(rows), unit="sequences", status="completed", force=True)
         if len(errors) != len(rows):
             raise ValueError("L1 returned a different number of scores")
         seconds = (time.perf_counter() - started) / len(rows)
@@ -346,11 +384,15 @@ class RealBackend:
             with _offline():
                 if key not in self._scorers:
                     self._release_ml()
+                    emit("detector_model_load", 0, 1, message=spec["key"], unit="models", force=True)
                     self._scorers[key] = _load_window_scorer(spec, self._device())
+                    emit("detector_model_load", 1, 1, message=spec["key"], unit="models", status="completed", force=True)
                 scorer = self._scorers[key]
                 cached_payloads = sum(text in scorer.cache for text in texts)
                 started = time.perf_counter()
-                scorer.score(texts)
+                model = getattr(getattr(scorer, "detector", None), "model", None)
+                with _forward_progress(model, "detector_windows", unit="windows"):
+                    scorer.score(texts)
                 seconds = (time.perf_counter() - started) / len(rows)
         result = []
         for row, blocks in zip(rows, parts):
@@ -394,14 +436,14 @@ class RealBackend:
         physical = "0" if device == "cuda" else device.split(":", 1)[-1]
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false",
                    CUDA_VISIBLE_DEVICES=physical, CUDA_DEVICE_ML="0", CUDA_DEVICE_TRAIN="0")
+        env["IG_PROGRESS_DIR"] = str(output / "progress")
         with tempfile.TemporaryDirectory(prefix="research_train_") as temporary:
             source, destination = Path(temporary) / "request.json", Path(temporary) / "result.json"
             source.write_text(json.dumps({"config": config, "seed": seed, "output": str(output)}), encoding="utf-8")
             command = [str(runtime.get("python", sys.executable)), "-u", "-m", "research_runner.adapters",
                        "--train-request", str(source), "--train-result", str(destination)]
-            with (output / "training.log").open("w", encoding="utf-8") as log:
-                subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
-                               check=True, timeout=runtime.get("training_timeout_seconds"))
+            logged_process(command, output / "training.log", cwd=ROOT, env=env,
+                           check=True, timeout=runtime.get("training_timeout_seconds"))
             return _read_json(destination)
 
     def infer_l3(self, requests, backend_config=None):
@@ -418,13 +460,16 @@ class RealBackend:
             self._release_ml()
         if cfg["backend"] == "vllm":
             return self._infer_vllm(requests, cfg)
-        return [_infer_http(item, cfg) for item in requests]
+        return [_infer_http(item, cfg) for item in iterable(requests, "l3_requests", unit="requests")]
 
     def _infer_vllm(self, requests, cfg):
         batch_size = cfg["batch_size"]
         result = []
-        for start in range(0, len(requests), batch_size):
+        emit("l3_requests", 0, len(requests), unit="requests", force=True)
+        for start in iterable(range(0, len(requests), batch_size), "l3_batches", unit="batches"):
             result.extend(self._infer_vllm_batch(requests[start:start + batch_size], cfg))
+            emit("l3_requests", len(result), len(requests), unit="requests")
+        emit("l3_requests", len(result), len(requests), unit="requests", status="completed", force=True)
         return result
 
     def _infer_vllm_batch(self, requests, cfg):
@@ -467,6 +512,7 @@ class RealBackend:
         if self._llm is not None and key != self._llm_key:
             raise ValueError("Use a new L3 worker for a different engine configuration")
         if self._llm is None:
+            emit("l3_model_load", 0, 1, unit="models", force=True)
             path = _snapshot(cfg["model"], cfg["revision"], cfg.get("path"), cfg.get("checkpoint_sha256"))
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
             self._llm = LLM(model=path, dtype=cfg["dtype"], tensor_parallel_size=1,
@@ -474,6 +520,7 @@ class RealBackend:
                             max_num_seqs=cfg["max_num_seqs"], max_num_batched_tokens=cfg["max_num_batched_tokens"],
                             enable_prefix_caching=True, enable_chunked_prefill=True, seed=cfg["seed"])
             self._llm_key = key
+            emit("l3_model_load", 1, 1, unit="models", status="completed", force=True)
         params = SamplingParams(temperature=cfg["temperature"], max_tokens=cfg["max_tokens"], seed=cfg["seed"],
                                 guided_decoding=GuidedDecodingParams(json=cfg["schema"]))
         return self._llm, params
@@ -598,6 +645,7 @@ def _infer_http(item, cfg):
         endpoint += "/chat/completions"
     request = urllib_request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method="POST")
     for attempt in range(cfg["max_retries"]):
+        emit("l3_http_attempts", attempt, cfg["max_retries"], unit="attempts", force=True)
         try:
             # Do not forward bearer credentials to a redirected host.
             opener = urllib_request.build_opener(_NoRedirect())
@@ -605,9 +653,12 @@ def _infer_http(item, cfg):
                 data = json.load(response)
             choice = data["choices"][0]
             usage = data.get("usage") or {}
+            emit("l3_http_attempts", attempt + 1, cfg["max_retries"], unit="attempts", status="completed", force=True)
             return _l3_result(item, choice["message"]["content"], choice.get("finish_reason"), cfg,
                               time.perf_counter() - started, usage.get("prompt_tokens"), usage.get("completion_tokens"))
         except Exception as exc:
+            emit("l3_http_attempts", attempt + 1, cfg["max_retries"], unit="attempts",
+                 status="failed" if attempt + 1 == cfg["max_retries"] else "running", force=True)
             if attempt + 1 == cfg["max_retries"]:
                 return _l3_error(item, exc, time.perf_counter() - started)
             time.sleep(attempt + 1)
@@ -794,6 +845,7 @@ def _score_rag(rows, train_rows, cfg, device):
             raise ValueError("RAGuard model revisions must be immutable commit hashes")
     with _offline():
         from models.baseline.raguard import RAGuardDetector
+        emit("rag_model_load", 0, 1, unit="models", force=True)
         path = _snapshot(model["model"], model["revision"], model.get("path"), model.get("checkpoint_sha256"))
         embed_path = _snapshot(embedding["model"], embedding["revision"], embedding.get("path"), embedding.get("checkpoint_sha256")) if use_ts else ""
         detector = RAGuardDetector(gpt2_model_name=path, embedding_model_name=embed_path,
@@ -801,6 +853,7 @@ def _score_rag(rows, train_rows, cfg, device):
             max_ppl_tokens=_integer(cfg.get("max_ppl_tokens", 512), "max_ppl_tokens"),
             min_words_per_doc=_integer(cfg.get("min_words_per_doc", 20), "min_words_per_doc"),
             use_ts=use_ts, device=device, verbose=False)
+        emit("rag_model_load", 1, 1, unit="models", status="completed", force=True)
         native_score = detector.score_doc
 
         def strict_score(query, doc):
@@ -813,13 +866,19 @@ def _score_rag(rows, train_rows, cfg, device):
         detector.score_doc = strict_score
         # The original wrapper catches scoring errors; count them explicitly.
         failures = []
+        documents = 0
+        document_phase = "rag_calibration_documents"
 
         def audited_score(query, doc):
+            nonlocal documents
             try:
                 return strict_score(query, doc)
             except Exception as exc:
                 failures.append(type(exc).__name__)
                 raise
+            finally:
+                documents += 1
+                emit(document_phase, documents, unit="documents")
 
         detector.score_doc = audited_score
         thresholds = cfg.get("thresholds")
@@ -834,11 +893,15 @@ def _score_rag(rows, train_rows, cfg, device):
             train = [_rag_sample(row) for row in train_rows]
             if not train:
                 raise ValueError("RAGuard requires benign training rows or explicit frozen thresholds")
+            emit(document_phase, 0, unit="documents", force=True)
             detector.fit(train, benign_label=0)
+            emit(document_phase, documents, documents, unit="documents", status="completed", force=True)
             if failures:
                 raise RuntimeError("RAGuard calibration skipped failed documents; refusing incomplete thresholds")
         outputs = []
-        for row in rows:
+        document_phase, documents = "rag_documents", 0
+        emit(document_phase, 0, unit="documents", force=True)
+        for row in iterable(rows, "rag_rows", unit="sequences"):
             started = time.perf_counter()
             before = len(failures)
             result = detector.predict_sample(_rag_sample(row), return_details=True)
@@ -851,6 +914,7 @@ def _score_rag(rows, train_rows, cfg, device):
                             "thresholds": dict(detector.thresholds), "seconds": time.perf_counter() - started,
                             "error": {"type": "RAGuardDocumentError", "message": "Document scoring failed"} if failed else None,
                             "limitations": ["retrieval_only", "short_documents_skipped_by_original_baseline"]})
+        emit(document_phase, documents, documents, unit="documents", status="completed", force=True)
         return outputs
 
 

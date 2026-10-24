@@ -355,7 +355,7 @@ experiments:
     include_validation_max_f1: true
   benign:
     resume: false
-    order: L1-L2-L3
+    orders: [L1-L2-L3, L2-L1-L3]
     ratios: [0.90, 0.92, 0.94, 0.96, 0.98]
     total_size: 2000
     sampling_seed: 1729

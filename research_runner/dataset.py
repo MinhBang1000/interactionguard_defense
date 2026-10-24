@@ -33,6 +33,8 @@ from data.prepare_training import prepare
 from eval.asr import episode_hash, evaluate_files, load_judges
 from eval.prompt_success_judge import MODEL, apply_reviews, reusable_record
 
+from .progress import emit, iterable, logged_process
+
 
 def _absolute(value, name, *, preserve_symlinks=False):
     path = Path(value)
@@ -68,6 +70,8 @@ def _apply_reviews(samples, judge_path, review_path):
 
 
 def _judge(config, samples, judge_path, review_path, temporary):
+    emit("dataset.judging", 0, len(samples), unit="episodes", force=True,
+         message="Checking cached judgements and reviews")
     options = config["data"].get("judge", {})
     skip = options.get("skip", True)
     if type(skip) is not bool:
@@ -78,7 +82,7 @@ def _judge(config, samples, judge_path, review_path, temporary):
     model = "meta-llama/Llama-3.1-8B-Instruct" if backend == "vllm" else MODEL
     cached = _apply_reviews(samples, judge_path, review_path)
     pending = []
-    for trace in samples:
+    for trace in iterable(samples, "dataset.judging.cache", unit="episodes"):
         record = cached.get(trace["id"], {})
         reviewed = (record.get("episode_sha256") == episode_hash(trace)
                     and isinstance(record.get("review"), dict)
@@ -86,9 +90,11 @@ def _judge(config, samples, judge_path, review_path, temporary):
         if not reviewed and not reusable_record(trace, record, model):
             pending.append(trace)
     executed = False
+    emit("dataset.judging", len(samples) - len(pending), len(samples), unit="episodes",
+         message=f"{len(pending)} pending; judging {'disabled' if skip else 'enabled'}")
     if pending and not skip:
         runtime = config.get("runtime", {})
-        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
         if backend == "vllm":
             device = str(runtime.get("device", "0"))
             if device == "cpu":
@@ -125,9 +131,18 @@ def _judge(config, samples, judge_path, review_path, temporary):
                    "--traces", str(traces), "--output", str(judge_path),
                    "--reviews", str(reviews), "--backend", backend,
                    "--base-url", options.get("base_url") or "http://127.0.0.1:11434/v1"]
-        subprocess.run(command, cwd=workspace, check=True, env=environment)
+        emit("dataset.judging.pending", 0, len(pending), unit="episodes", force=True,
+             message="Running judge subprocess")
+        logged_process(command, temporary.parent / 'judges/judge.log', phase='dataset.judge_worker',
+                       cwd=workspace, check=True, env=environment)
         _apply_reviews(samples, judge_path, review_path)
         executed = True
+        emit("dataset.judging.pending", len(pending), len(pending), unit="episodes",
+             status="completed", force=True)
+    resolved = len(samples) if executed else len(samples) - len(pending)
+    emit("dataset.judging", resolved, len(samples), unit="episodes", force=True,
+         status="skipped" if pending and skip else "completed",
+         message=f"{len(pending) if skip else 0} episodes left pending")
     return {"skip": skip, "backend": backend, "pending_episodes": len(pending),
             "subprocess_ran": executed}
 
@@ -162,10 +177,12 @@ def prepare_dataset(config: dict, output: Path) -> dict:
             raise ValueError("data.reference_test_sha256 must be a SHA-256 digest or None")
         reference = reference.lower()
 
-    raw_hashes = {name: sha256(root / "raw" / name) for name in SOURCES}
+    raw_hashes = {name: sha256(root / "raw" / name)
+                  for name in iterable(SOURCES, "dataset.verify_raw", unit="files")}
     membership = load_membership(root, None)
     if membership is None:
         raise ValueError("Existing complete split membership is required; refusing to resplit")
+    episode_count = sum(len(ids) for ids in membership.values())
     original_manifest = root / "splits/split_manifest.json"
     protected = {root / "raw" / name for name in SOURCES}
     protected.update(p for p in (judges, reviews) if p is not None)
@@ -195,22 +212,42 @@ def prepare_dataset(config: dict, output: Path) -> dict:
         samples = [normalize_trace(t) for t in read_jsonl(
             temporary / "raw/prompt_injection_traces.jsonl")]
         judge = _judge(config, samples, judge_path, review_path, temporary)
+        emit("dataset.annotate", 0, episode_count, unit="episodes", force=True)
         annotation = annotate_sources(temporary, output / "annotated", judge_path)
+        emit("dataset.annotate", annotation["unique_episodes"], episode_count,
+             unit="episodes", status="completed", force=True)
+        emit("dataset.split", 0, episode_count, unit="episodes", force=True,
+             message="Reusing existing split membership and order")
         split_manifest = split(["--data-dir", str(temporary), "--source-dir",
                                 str(output / "annotated"), "--require-outcomes"])
     if split_manifest["episode_ids"] != membership:
         raise ValueError("Preserved split membership/order changed")
     split_manifest["source_dir"] = str(final / "annotated")
     write_json(output / "splits/split_manifest.json", split_manifest)
+    emit("dataset.split", episode_count, episode_count, unit="episodes",
+         status="completed", force=True,
+         message=", ".join(f"{name}={len(ids)}" for name, ids in membership.items()))
+    emit("dataset.prefix", 0, unit="prefixes", force=True)
     preprocessing = preprocess(["--split-dir", str(output / "splits"),
                                 "--output-dir", str(output / "processed")])
+    prefix_count = sum(stats["total_samples"] for stats in preprocessing["splits"].values())
+    emit("dataset.prefix", prefix_count, prefix_count, unit="prefixes",
+         status="completed", force=True)
     test_hash = sha256(output / "processed/test_processed.jsonl")
     if reference is not None and test_hash != reference:
         raise ValueError(f"Processed test reference SHA-256 mismatch: {test_hash} != {reference}")
+    emit("dataset.training", 0, unit="prefixes", force=True,
+         message="Materializing eligible encoder/autoencoder train/validation data")
     training = prepare(output / "processed", output / "training")
     for name, source in training["sources"].items():
         source["path"] = str(final / f"processed/{name}_processed.jsonl")
     write_json(output / "training/manifest.json", training)
+    training_count = sum(meta["rows"] for meta in training["artifacts"].values())
+    emit("dataset.training", training_count, training_count, unit="prefixes", force=True,
+         status="completed",
+         message=", ".join(f"{name}={meta['rows']}" for name, meta in training["artifacts"].items()))
+    emit("dataset.validate", 0, unit="files", force=True,
+         message="Evaluating baseline and verifying immutable inputs and output hashes")
     report = evaluate_files(output / "splits/test.jsonl", judges=judge_path)
     report["provenance"]["traces_path"] = str(final / "splits/test.jsonl")
     write_json(output / "asr/test_baseline_asr_v3.json", report)
@@ -227,6 +264,8 @@ def prepare_dataset(config: dict, output: Path) -> dict:
                 with path.open(encoding="utf-8") as handle:
                     meta["rows"] = sum(bool(line.strip()) for line in handle)
             artifacts[path.relative_to(output).as_posix()] = meta
+            emit("dataset.validate", len(artifacts), unit="files",
+                 message=path.relative_to(output).as_posix())
     manifest = {
         "version": "research_dataset_v1", "data_root": str(root), "output": str(final),
         "raw_sha256": raw_hashes, "membership_policy": split_manifest["membership_policy"],
@@ -244,4 +283,6 @@ def prepare_dataset(config: dict, output: Path) -> dict:
         "asr": {key: report[key] for key in ("contract", "global", "per_attack_type", "benign")},
     }
     write_json(output / "dataset_manifest.json", manifest)
+    emit("dataset.validate", len(artifacts), len(artifacts), unit="files",
+         status="completed", force=True, message="Dataset manifest written")
     return manifest

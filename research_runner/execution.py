@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import time
 
+from research_runner.progress import emit, logged_process
+
 
 def physical_device(value):
     value = str(value)
@@ -23,6 +25,8 @@ def require_idle_gpu(config, *, check_output=subprocess.check_output, sleep=time
             return
         if time.monotonic() >= deadline:
             raise RuntimeError('GPU is busy. No foreign process will be stopped; retry when the configured GPU is idle.')
+        emit('gpu_availability', status='waiting',
+             message=f"GPU {runtime['device']}: {used.strip()} MiB used; waiting for <= {runtime['max_gpu_memory_mib']} MiB. No process will be stopped.", force=True)
         sleep(2)
 
 
@@ -50,13 +54,13 @@ class ProcessExecutor:
                            CUDA_DEVICE_ML=device, CUDA_DEVICE_TRAIN=device,
                            TOKENIZERS_PARALLELISM='false', HF_HUB_OFFLINE='1',
                            TRANSFORMERS_OFFLINE='1', VLLM_WORKER_MULTIPROC_METHOD='spawn')
-        with (destination / 'worker.log').open('w') as log:
-            try:
-                subprocess.run([python, '-u', '-m', 'research_runner.worker', str(spec)],
-                               cwd=self.config['paths']['workspace'], env=environment,
-                               stdout=log, stderr=subprocess.STDOUT, check=True)
-            except subprocess.CalledProcessError as exc:
-                raise RuntimeError(f'Worker {operation} failed (exit {exc.returncode}). See retained worker.log in the failed-run diagnostics.') from exc
+        environment['IG_PROGRESS_DIR'] = str(destination / 'progress')
+        try:
+            logged_process([python, '-u', '-m', 'research_runner.worker', str(spec)],
+                           destination / 'worker.log', phase=f'{operation} worker',
+                           cwd=self.config['paths']['workspace'], env=environment, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f'Worker {operation} failed (exit {exc.returncode}). See retained worker.log in the failed-run diagnostics.') from exc
         result = destination / 'worker_result.json'
         if not result.is_file():
             raise RuntimeError(f'Worker exited without a completion result: {result}')

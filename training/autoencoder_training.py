@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import time
 
+from research_runner.progress import emit, iterable
+
 
 def extract_embeddings(encoder_dir, rows, output, device="cuda:0"):
     import numpy as np
@@ -30,7 +32,10 @@ def extract_embeddings(encoder_dir, rows, output, device="cuda:0"):
         if cached.get("identity") == identity and cached.get("array_sha256") == sha256(output):
             array = np.load(output)
             if array.shape == (len(rows), 768):
+                emit('ae.embeddings', len(rows), len(rows), unit='prefixes', status='completed',
+                     message=f'Compatible cache: {output.name}', force=True)
                 return array
+    emit('ae.encoder_load', message=f'Loading encoder for {output.name}.', force=True)
     tokenizer = AutoTokenizer.from_pretrained(encoder_dir, local_files_only=True)
     encoder = AutoModel.from_pretrained(encoder_dir, local_files_only=True,
                                         attn_implementation="sdpa", reference_compile=False).to(device).eval()
@@ -38,7 +43,7 @@ def extract_embeddings(encoder_dir, rows, output, device="cuda:0"):
     values = []
     start = time.perf_counter()
     with torch.inference_mode():
-        for i, row in enumerate(rows):
+        for i, row in enumerate(iterable(rows, f'ae.embeddings.{output.name}', unit='prefixes')):
             batch = tokenizer(row["sequence"], truncation=True, max_length=settings["max_length"],
                               padding=True, return_tensors="pt")
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -123,7 +128,9 @@ def run(*, encoder_dir=None, output_dir=None, seed=42, recall_floor=0.98,
                                            "benign_validation": [r["id"] for r in benign_val_rows],
                                            "calibration": [r["id"] for r in val_rows]})
     candidates = []
-    for lr, latent in grid:
+    for lr, latent in iterable(grid, 'ae.candidates', unit='candidates'):
+        phase = f'ae.lr_{lr:g}.latent_{latent}'
+        emit(phase, 0, config.EPOCHS, unit='epochs', message=f'Seed={seed}', force=True)
         torch.manual_seed(seed); np.random.seed(seed)
         candidate_dir = output / f"lr_{lr:g}_latent_{latent}"
         candidate_dir.mkdir(parents=True, exist_ok=True)
@@ -136,7 +143,7 @@ def run(*, encoder_dir=None, output_dir=None, seed=42, recall_floor=0.98,
         best_loss, stale, best_state, history, best_epoch = float("inf"), 0, None, [], None
         for epoch in range(config.EPOCHS):
             model.train(); total, count = 0.0, 0
-            for (batch,) in loader:
+            for (batch,) in iterable(loader, f'{phase}.epoch_{epoch+1}', unit='batches'):
                 batch = batch.to("cuda:0")
                 optimizer.zero_grad(set_to_none=True)
                 reconstructed, _ = model(batch)
@@ -150,6 +157,8 @@ def run(*, encoder_dir=None, output_dir=None, seed=42, recall_floor=0.98,
             history.append({"epoch": epoch+1, "train_loss": total/count, "val_loss": val_loss,
                             "learning_rate": optimizer.param_groups[0]["lr"]})
             print(f"AE lr={lr:g} latent={latent} epoch={epoch+1} train={total/count:.7f} val={val_loss:.7f}", flush=True)
+            emit(phase, epoch+1, config.EPOCHS, unit='epochs',
+                 message=f'Train loss={total/count:.7f}; validation loss={val_loss:.7f}', force=True)
             if val_loss < best_loss-config.MIN_DELTA:
                 best_loss, stale, best_state = val_loss, 0, copy.deepcopy(model.state_dict())
                 best_epoch = epoch+1
@@ -158,6 +167,8 @@ def run(*, encoder_dir=None, output_dir=None, seed=42, recall_floor=0.98,
                 if stale >= config.PATIENCE:
                     break
         model.load_state_dict(best_state)
+        emit(phase, epoch+1, config.EPOCHS, unit='epochs', status='completed',
+             message=f'Training ended; selected epoch={best_epoch}. Calibrating on validation.', force=True)
         errors = reconstruction_errors(model, val_emb, "cuda:0")
         calibration = calibrate(labels, errors, recall_floor)
         checkpoint = {"model_state_dict": best_state,

@@ -118,6 +118,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["runtime"]["device"], "cpu")
         self.assertGreater(config["runtime"]["max_gpu_memory_mib"], 0)
 
+    def test_benign_sweep_orders_and_legacy_single_order(self):
+        self.value['experiments']['benign'] = {'orders': ['L1-L2-L3', 'L2-L1-L3']}
+        self.assertEqual(self.load()['experiments']['benign']['orders'], ['L1-L2-L3', 'L2-L1-L3'])
+        self.value['experiments']['benign'] = {'order': 'L1-L2-L3'}
+        settings = self.load()['experiments']['benign']
+        self.assertEqual(settings['orders'], ['L1-L2-L3'])
+        self.assertNotIn('order', settings)
+        for invalid in ({}, {'orders': []}, {'orders': ['L3-L1']},
+                        {'orders': ['L1', 'L1']}, {'order': 'L1', 'orders': ['L1']}):
+            self.value['experiments']['benign'] = invalid
+            with self.subTest(settings=invalid), self.assertRaises(ConfigError):
+                self.load()
+
     def test_secrets_are_env_names_not_interpolated_values(self):
         with patch.dict(os.environ, {"EXAMPLE_API_KEY": "first-secret"}):
             first = self.load()

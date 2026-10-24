@@ -77,6 +77,10 @@ fixed encoder/AE datasets -> validation/reporting.
 
 Original raw, split and judge inputs stay unchanged. New data and copied judge
 cache/reviews are published under `results/research_runner/dataset/`.
+Final provenance paths are assigned before dataset checksums are collected;
+publication does not re-serialize the hashed metadata. Both dataset reports
+describe the published files' SHA-256, byte sizes and JSONL row counts, while
+the outer artifact manifest additionally covers the reports/effective config.
 Missing prompt-success judgments may invoke the configured Llama judge during a
 real Item 0 run. `data.judge.skip: true` disables those calls; missing evidence
 then remains UNKNOWN. The success judge is distinct from the L3 defense.
@@ -145,6 +149,15 @@ candidates must be available in their configured environments. Item 6 sweeps
 validation-derived L1 gates, not test-selected numerical thresholds. Item 7
 samples 90/92/94/96/98% benign prefixes without replacement, with reproducible
 IDs and attack-category stratification, keeping thresholds fixed per seed.
+Item 7 now compares `experiments.benign.orders: [L1-L2-L3, L2-L1-L3]` on the
+exact same ordered prefix IDs for each seed/ratio. Sampling happens once before
+the order loop; thresholds are not retuned. It reuses Stage 1 L1/L2 scores and
+runs L3 only for each condition's pending set under the configured timing policy.
+Results are separated as `benign/seed_<seed>/benign_<ratio>/<order>/`; shared
+`workload.json` records and paired-workload hashes prove the pairing. Each order
+also records benign prefixes forwarded by L1 at the front gate. Summaries group
+by `benign_<ratio>/<order>`. The main figure compares both orders' F1/estimated
+latency; each order retains a separate F1/traffic/latency figure, without titles.
 Because these are partial-prefix workloads, whole-episode ASR/false-blocking is
 reported in Item 3, not inferred from incomplete Item 7 episodes.
 
@@ -166,11 +179,56 @@ inference repeat. The default uncached timing path does not reuse verdicts.
 Staged timing is a **component-based pipeline estimate**, not direct end-to-end
 latency or production throughput; model-loading time is excluded.
 
+## Live Progress
+
+Every menu item (0-8) prints live `[IG]` updates without extra parameters:
+current stage, seed/condition, completed/total units, a percentage bar, elapsed
+time and estimated remaining time when the total is known. Training reports
+encoder optimizer steps/validation batches and AE candidates/epochs/batches;
+evaluation reports L1 prefixes, L2 windows, L3 requests/batches and RAG documents.
+Dataset preparation reports annotation, split, prefix expansion and exports.
+Backup reports copied bytes/files and ZIP verification.
+
+Loading, preprocessing internals, or long batches with no known completion count
+show a heartbeat after about five seconds instead of an invented percentage.
+Heartbeat means the runner is alive, not that a backend is guaranteed healthy.
+Percentages and ETA refer to the **current phase**, not the whole campaign;
+early stopping can finish training below its planned step/epoch budget.
+
+Worker progress is streamed from `worker.log` (nested training uses
+`model/training.log`). Logs remain available; scientific artifacts are not
+rewritten to track live status. The latest menu status and append-only event
+history are stored separately at:
+
+```text
+results/research_runner/.progress/<experiment>/progress.json
+results/research_runner/.progress/<experiment>/progress.jsonl
+```
+
+For example, monitor item 2 from another terminal:
+
+```bash
+tail -f results/research_runner/.progress/configuration/progress.jsonl
+```
+
+Workers also save local `progress/` records inside their staged/published output.
+Live `.progress/` files are excluded from backups; stable worker logs and status
+records remain subject to the configured backup scope. Progress does not change
+thresholds, inputs, batching, random seeds, ASR rules or GPU stage ordering.
+
 ## Overwrite and Backup
 
 Results publish transactionally from staging. A failed replacement leaves the
 previous complete output intact. A config/input/code mismatch invalidates reuse;
 never manually edit a completed directory.
+
+An explicitly audited code-only upgrade may record a compatibility receipt in
+`results/research_runner/.compatibility/`, without rewriting completed artifacts.
+Receipts bind the original manifest SHA/signature to the exact upgraded signature
+(including current code, scientific settings and inputs). They do not disable file
+integrity checks or accept later code/model/data changes. The benign-order upgrade
+preserves the verified Item 0-2 prerequisites this way; it does not retrain them.
+Keep these receipts in result backups; do not fabricate or manually update them.
 
 Item 8 creates a timestamped ZIP in `backup/` using the configured scope. It
 includes run-effective configs, checksums and a backup manifest, validates ZIP
