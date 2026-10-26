@@ -323,7 +323,7 @@ class EngineTests(unittest.TestCase):
         for row in read_jsonl(second / 'seed_42/Screen-Gate-Audit/prefix_decisions.jsonl'):
             self.assertNotIn('pending_l3', row)
             self.assertTrue(set(row['layer_scores']) <= {'Screen', 'Gate', 'Audit'})
-        archive_path = self.runner.run(8)
+        archive_path = self.runner.run(9)
         for name in ('dataset', 'training', 'configuration', 'baselines', 'channel_ablation',
                      'backend', 'threshold', 'benign', 'backup'):
             progress_root = self.results / '.progress' / name
@@ -421,7 +421,10 @@ class EngineTests(unittest.TestCase):
             report = read_json(path)
             self.assertEqual(report["selection_source"], "validation_only")
             self.assertTrue(report["other_models_and_policies_fixed"])
-            self.assertEqual(report["gate"]["objective"], "max_validation_f1_subject_to_recall_floor")
+            expected = ('max_validation_f1_subject_to_recall_floor' if report['operating_point'] == 'validation_max_f1'
+                        else 'max_threshold_under_recall_floor')
+            self.assertEqual(report['gate']['objective'], expected)
+            self.assertEqual(report['sweep_selection_policy'], 'max_threshold_under_recall_floor')
             key = (report['seed'], report['operating_point'])
             shared = {k: v for k, v in report.items() if k not in ('configuration', 'primary')}
             if key not in paired:

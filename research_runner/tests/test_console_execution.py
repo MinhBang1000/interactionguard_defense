@@ -26,7 +26,9 @@ class ConsoleTests(unittest.TestCase):
         choices = iter([*MENU, 'Q'])
         status = main([], input_fn=lambda _: next(choices), print_fn=messages.append, runner_factory=Runner)
         self.assertEqual(status, 0)
-        self.assertEqual(calls, list(range(9)))
+        self.assertEqual(calls, list(range(10)))
+        self.assertIn('Auditor-Targeted', MENU['8'])
+        self.assertEqual(MENU['9'], 'Backup Snapshot')
         self.assertTrue(any('Backup Snapshot' in s for s in messages))
 
     def test_overwrite_defaults_no_and_explicit_yes_only(self):

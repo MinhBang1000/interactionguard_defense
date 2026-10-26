@@ -15,7 +15,8 @@ MENU = {
     '5': 'Audit Backend Comparison',
     '6': 'Gate Threshold Sweep',
     '7': 'Benign-Ratio Sweep',
-    '8': 'Backup Snapshot',
+    '8': 'Auditor-Targeted Case Stress Test',
+    '9': 'Backup Snapshot',
 }
 
 
@@ -58,7 +59,7 @@ def main(argv=None, *, input_fn=input, print_fn=print, runner_factory=ResearchRu
         if choice == 'Q':
             return 0
         if choice not in MENU:
-            print_fn('Invalid selection. Choose 0-8 or Q.')
+            print_fn('Invalid selection. Choose 0-9 or Q.')
             continue
         try:
             run_selection(runner, choice, input_fn=input_fn, print_fn=print_fn)

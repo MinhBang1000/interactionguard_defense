@@ -37,6 +37,10 @@ def execute(operation, config, job, output, backend=None):
             write_jsonl(output / f'gate_scores_seed{seed}.jsonl', scores)
             write_jsonl(output / f'gate_validation_seed{seed}.jsonl', backend.score_gate(validation, checkpoint))
             result['seeds'][seed] = {'checkpoint': checkpoint, 'scores_file': f'gate_scores_seed{seed}.jsonl'}
+    elif operation == 'auditor_targeted_score':
+        write_jsonl(output / 'screen_scores.jsonl', backend.score_detector(rows, config['models']['screen']))
+        write_jsonl(output / 'gate_scores.jsonl', backend.score_gate(rows, job['checkpoint']))
+        result = {'rows': len(rows), 'seed': job['checkpoint']['seed'], 'recalibration': False}
     elif operation == 'infer':
         requests = read_jsonl(job['requests'])
         responses = backend.infer_audit(requests, job.get('backend'))

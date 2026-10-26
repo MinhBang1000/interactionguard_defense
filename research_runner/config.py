@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
 }
 
 _EXPERIMENTS = {"configuration", "baselines", "channel_ablation", "backend",
-                "threshold", "benign", "timing"}
+                "threshold", "benign", "timing", "auditor_targeted"}
 _PATH_KEYS = {"path", "checkpoint", "checkpoint_path", "checkpoint_dir",
               "encoder_path", "autoencoder_path", "ae_path", "model_path",
               "output_dir", "cache_dir", "train_path", "validation_path", "test_path"}
@@ -265,6 +265,12 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
                 raise ConfigError(f'experiments.{name}.orders is required; use a list, not order')
             if config['primary_order'] not in settings['orders']:
                 raise ConfigError(f'experiments.{name}.orders must include primary_order')
+        if name == 'threshold':
+            from research_runner.threshold_sweep import validate_settings
+            try:
+                validate_settings(settings)
+            except ValueError as exc:
+                raise ConfigError(f'Invalid Gate sweep: {exc}') from exc
         if name == 'backend':
             if settings.get('order') != 'Screen-Gate-Audit' or 'orders' in settings:
                 raise ConfigError('experiments.backend.order must be Screen-Gate-Audit; sweep candidates, not orders')
@@ -278,6 +284,11 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
                 if not isinstance(candidate, dict):
                     raise ConfigError('Each backend candidate must be a mapping')
                 _settings(candidate, 'backend candidate')
+                from research_runner.modern_audit import validate_options
+                try:
+                    validate_options(candidate)
+                except ValueError as exc:
+                    raise ConfigError(f'Invalid backend candidate: {exc}') from exc
                 candidate_name = candidate.get('name')
                 if not isinstance(candidate_name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', candidate_name):
                     raise ConfigError('Backend candidate name must be a safe nonempty path component')
@@ -371,6 +382,10 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
             config["runtime"][key] = os.path.abspath(executable if executable.is_absolute()
                                                       else workspace / executable)
     config["models"] = _model_paths(config["models"], workspace)
+    for candidate in config['experiments'].get('backend', {}).get('candidates', []):
+        if 'python' in candidate:
+            executable = Path(candidate['python']).expanduser()
+            candidate['python'] = os.path.abspath(executable if executable.is_absolute() else workspace / executable)
     for key in ("encoder", "autoencoder"):
         value = config["models"].get(key)
         if isinstance(value, str):
@@ -380,4 +395,10 @@ def load_config(path: str | Path, root: str | Path | None = None) -> dict:
                                 for value in config["backup"][key]]
     config["_config_path"] = str(source.absolute())
     config["_config_sha256"] = hashlib.sha256(source_bytes).hexdigest()
+    if 'auditor_targeted' in config['experiments']:
+        from research_runner.auditor_targeted import validate_settings
+        try:
+            validate_settings(config)
+        except ValueError as exc:
+            raise ConfigError(f'Invalid auditor-targeted case test: {exc}') from exc
     return config

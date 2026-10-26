@@ -13,9 +13,11 @@ from research_runner.execution import ProcessExecutor
 from research_runner.payloads import request
 from research_runner.scoring import route, calibrate_gate, metrics, score_episodes
 from research_runner.progress import Reporter, emit, iterable, scope
+from research_runner.threshold_sweep import select_gate_threshold
 
 NAMES = {0: 'dataset', 1: 'training', 2: 'configuration', 3: 'baselines',
-         4: 'channel_ablation', 5: 'backend', 6: 'threshold', 7: 'benign'}
+         4: 'channel_ablation', 5: 'backend', 6: 'threshold', 7: 'benign',
+         8: 'auditor_targeted'}
 
 
 def index_scores(records, rows):
@@ -153,17 +155,17 @@ class ResearchRunner:
         return self.store.transaction(name, self.signature(name, parents), overwrite=overwrite, resume=resume and not overwrite)
 
     def run(self, item, *, overwrite=False):
-        if item not in {*NAMES, 8}:
+        if item not in {*NAMES, 9}:
             raise ValueError('Unknown experiment selection')
-        name = 'backup' if item == 8 else NAMES[item]
+        name = 'backup' if item == 9 else NAMES[item]
         with scope(Path(self.config['paths']['results']) / '.progress' / name, f'Experiment {item}: {name}'):
-            if item == 8:
+            if item == 9:
                 from research_runner.artifacts import backup_snapshot
                 return backup_snapshot(self.config)
             return getattr(self, name)(overwrite=overwrite)
 
     def cancel(self, item):
-        name = 'backup' if item == 8 else NAMES[item]
+        name = 'backup' if item == 9 else NAMES[item]
         Reporter(Path(self.config['paths']['results']) / '.progress' / name).update(
             f'Experiment {item}: {name}', status='cancelled',
             message='Overwrite declined; existing scientific results are unchanged.', force=True)
@@ -178,6 +180,10 @@ class ResearchRunner:
             # Preparation already writes final provenance paths before hashing.
             # Re-serializing metadata here would invalidate its nested checksums.
         return self.prerequisite('dataset')
+
+    def auditor_targeted(self, *, overwrite=False):
+        from research_runner.auditor_targeted import run_case
+        return run_case(self, overwrite=overwrite)
 
     def training(self, *, overwrite=False):
         data = self.data_root()
@@ -461,38 +467,75 @@ class ResearchRunner:
     def backend(self, *, overwrite=False):
         first = self.compatible('configuration_stage1', ('dataset', 'training'))
         settings = self.config['experiments']['backend']
+        from research_runner.backend_reuse import validate_reference_candidate, load_reference, publish_reference
+        if any(candidate.get('model') == self.config['models']['audit']['model']
+               and not candidate.get('reuse_configuration') for candidate in settings['candidates']):
+            raise ValueError('The primary Llama backend must reuse Item 2; new inference is forbidden in Item 5')
+        reused = [candidate for candidate in settings['candidates'] if candidate.get('reuse_configuration')]
+        for candidate in reused:
+            validate_reference_candidate(self.config, candidate)
+        parents = ('configuration_stage1', 'configuration_stage2') if reused else ('configuration_stage1',)
         rows = self.rows()
+        inputs = {}
         # Verify every seed before paying for any backend inference.
         for seed in self.config['training']['seeds']:
-            self._backend_inputs(first, seed, rows, settings['order'])
-        with self.transaction('backend', ('configuration_stage1',), overwrite, settings['resume']) as out:
+            inputs[seed] = self._backend_inputs(first, seed, rows, settings['order'])
+        try:
+            full = self.compatible('configuration_stage2', ('configuration_stage1',)) if reused else None
+        except FileNotFoundError as exc:
+            raise ValueError('Missing Experiment 2 configuration_stage2 reference. Complete Item 2 Stage 2; Item 5 will not rerun Llama.') from exc
+        references = {seed: load_reference(self, full, first, seed, rows, inputs[seed][0], inputs[seed][1])
+                      for seed in self.config['training']['seeds']} if reused else {}
+        preflight = None
+        if isinstance(self.executor, ProcessExecutor):
+            preflight = self.executor.preflight_audit(settings['candidates'])
+        with self.transaction('backend', parents, overwrite, settings['resume']) as out:
             if (out / 'stage_complete.json').exists():
                 return out
+            if preflight is not None:
+                write_json(out / 'runtime_preflight.json', preflight)
             for seed in iterable(self.config['training']['seeds'], 'backend.seeds', unit='seeds'):
                 staged, requests, routing, source = self._backend_inputs(first, seed, rows, settings['order'])
                 expected = fingerprint([(r['prefix_id'], r['request_id']) for r in requests])
                 for candidate in iterable(settings['candidates'], f'backend.seed_{seed}', unit='backends'):
                     emit(f'backend.seed_{seed}.{candidate["name"]}', message=f'{len(requests)} pending requests; upstream routing fixed.', force=True)
-                    answers = self.infer(requests, out / f'seed_{seed}/{candidate["name"]}/audit', candidate)
-                    lookup = {r['prefix_id']: r for r in answers}
-                    decisions = deepcopy(staged)
-                    for d in decisions:
-                        if d['pending_audit']:
-                            answer = lookup[d['id']]
-                            resolve_pending(d, answer)
-                        d.update(configuration=settings['order'], seed=seed)
                     directory = out / f'seed_{seed}/{candidate["name"]}'
-                    self.report(directory, rows, decisions)
+                    if candidate.get('reuse_configuration'):
+                        emit(f'backend.seed_{seed}.{candidate["name"]}', message='Reusing exact Item 2 reference; zero new inference and inherited timing.', force=True)
+                        publish_reference(references[seed], directory)
+                    else:
+                        answers = self.infer(requests, directory / 'audit', candidate)
+                        lookup = {r['prefix_id']: r for r in answers}
+                        decisions = deepcopy(staged)
+                        for d in decisions:
+                            if d['pending_audit']:
+                                answer = lookup[d['id']]
+                                resolve_pending(d, answer)
+                            d.update(configuration=settings['order'], seed=seed)
+                        self.report(directory, rows, decisions)
                     write_json(directory / 'routing_identity.json', {'pending_set_sha256': expected,
                                'seed': seed, 'backend': candidate, 'same_upstream_routing': True,
                                'configuration': settings['order'], 'ordered_prefix_ids': [r['prefix_id'] for r in requests],
                                'routing_sha256': file_sha256(routing), 'requests_sha256': file_sha256(source)})
+            write_json(out / 'comparison_protocol.json', {
+                candidate['name']: {'reference_reused_from_item_2': bool(candidate.get('reuse_configuration')),
+                                    'new_inference_trials': 0 if candidate.get('reuse_configuration') else len(self.config['training']['seeds']),
+                                    'latency_source': 'inherited_item_2' if candidate.get('reuse_configuration') else 'new_item_5_inference'}
+                for candidate in settings['candidates']})
             write_json(out / 'stage_complete.json', {'source_stage1': str(first),
                        'configuration': settings['order'], 'primary_order': self.config['primary_order']})
             self.aggregate(out)
+            summary = read_json(out / 'summary.json')
+            for candidate in reused:
+                summary[candidate['name']].update(
+                    variation='inherited_item_2_seed_results_not_new_inference_trials',
+                    reference_reused_from_item_2=True, new_inference_trials=0,
+                    latency_source='inherited_item_2')
+            write_json(out / 'summary.json', summary)
         return self.prerequisite('backend')
 
     def threshold(self, *, overwrite=False):
+        from research_runner.threshold_reuse import ThresholdReference, publish_threshold_reference, finish_threshold_summary
         first = self.compatible('configuration_stage1', ('dataset', 'training'))
         settings = self.config['experiments']['threshold']
         rows = self.rows()
@@ -506,12 +549,14 @@ class ResearchRunner:
         score_sources = {'stage1_manifest_sha256': file_sha256(first / 'manifest.json'),
                          'screen_test_sha256': file_sha256(first / 'scores/screen_scores.jsonl'),
                          'screen_calibration_sha256': file_sha256(first / 'scores/screen_calibration.json')}
-        with self.transaction('threshold', ('configuration_stage1',), overwrite, settings['resume']) as out:
+        reference = ThresholdReference(self, first)
+        parents = ('configuration_stage1', 'configuration_stage2') if reference.full else ('configuration_stage1',)
+        with self.transaction('threshold', parents, overwrite, settings['resume']) as out:
             if (out / 'stage_complete.json').exists():
                 return out
             for seed in iterable(self.config['training']['seeds'], 'threshold.seeds', unit='seeds'):
                 gate, val = score_sets[seed]
-                gates = [(f'recall_{floor}', calibrate_gate([r['label'] for r in validation],
+                gates = [(f'recall_{floor}', select_gate_threshold([r['label'] for r in validation],
                          [val[r['id']]['score'] for r in validation], floor)) for floor in settings['recall_floors']]
                 if settings['include_validation_max_f1']:
                     gates.insert(0, ('validation_max_f1', calibrate_gate([r['label'] for r in validation],
@@ -520,6 +565,7 @@ class ResearchRunner:
                     emit(f'threshold.seed_{seed}.{name}', message=f"Gate threshold={calibration['threshold']}; other settings fixed.", force=True)
                     directory = out / f'seed_{seed}/{name}'
                     shared = {'seed': seed, 'operating_point': name, 'gate': calibration,
+                              'sweep_selection_policy': settings.get('selection_policy', 'max_threshold_under_recall_floor'),
                               'screen_threshold': screen_threshold, 'sample_ids': [r['id'] for r in rows],
                               'selection_source': 'validation_only', 'other_models_and_policies_fixed': True,
                               'score_sources': {**score_sources,
@@ -535,18 +581,32 @@ class ResearchRunner:
                                      'configuration': order, 'seed': seed, 'operating_point': name}
                                     for r in rows if r['id'] in pending]
                         condition = directory / order
-                        lookup = {a['prefix_id']: a for a in self.infer(requests, condition / 'audit')}
-                        for d in decisions:
-                            if d['pending_audit']:
-                                resolve_pending(d, lookup[d['id']])
-                            d.update(configuration=order, seed=seed)
-                        self.report(condition, rows, decisions)
+                        bundle, reason = reference.lookup(seed, order, rows, decisions, requests, calibration)
+                        if bundle is not None:
+                            emit(f'threshold.seed_{seed}.{name}.{order}', message='Reusing verified Item 2 verdicts; zero new Audit requests, inherited latency.', force=True)
+                            publish_threshold_reference(bundle, condition)
+                        else:
+                            emit(f'threshold.seed_{seed}.{name}.{order}', message=f'Fresh inference. Reuse: {reason}', force=True)
+                            lookup = {a['prefix_id']: a for a in self.infer(requests, condition / 'audit')}
+                            for d in decisions:
+                                if d['pending_audit']:
+                                    resolve_pending(d, lookup[d['id']])
+                                d.update(configuration=order, seed=seed)
+                            self.report(condition, rows, decisions)
+                        execution = {'seed': seed, 'operating_point': name, 'configuration': order,
+                                     'result_source': 'inherited_item_2' if bundle is not None else 'new_item_6_inference',
+                                     'latency_source': 'inherited_item_2' if bundle is not None else 'new_item_6_audit_component',
+                                     'new_audit_requests': read_json(condition / 'audit/timing.json')['submitted_requests'],
+                                     'reuse_fallback_reason': reason}
+                        write_json(condition / 'execution.json', execution)
                         write_json(condition / 'operating_point.json', {**shared, 'configuration': order,
                                    'primary': order == self.config['primary_order']})
             write_json(out / 'stage_complete.json', {'variable': 'validation-derived Gate threshold',
+                       'selection_policy': settings.get('selection_policy', 'max_threshold_under_recall_floor'),
                        'orders': settings['orders'], 'primary_order': self.config['primary_order'],
                        'paired_workloads_across_configurations': True})
             self.aggregate(out)
+            finish_threshold_summary(out)
         return self.prerequisite('threshold')
 
     def benign(self, *, overwrite=False):

@@ -463,6 +463,9 @@ class RealBackend:
         return [_infer_http(item, cfg) for item in iterable(requests, "audit_requests", unit="requests")]
 
     def _infer_vllm(self, requests, cfg):
+        if cfg.get("structured_output_api") == "structured_outputs":
+            from research_runner.modern_audit import infer_modern_audit
+            return infer_modern_audit(self, requests, cfg)
         batch_size = cfg["batch_size"]
         result = []
         emit("audit_requests", 0, len(requests), unit="requests", force=True)
@@ -481,7 +484,7 @@ class RealBackend:
                 tokenizer = llm.get_tokenizer()
                 texts = [tokenizer.apply_chat_template(
                     [{"role": "system", "content": cfg["system_prompt"]}, {"role": "user", "content": item["payload"]}],
-                    tokenize=False, add_generation_prompt=True) for item in requests]
+                    tokenize=False, add_generation_prompt=True, **cfg.get("chat_template_kwargs", {})) for item in requests]
                 lengths = [len(tokenizer.encode(text, add_special_tokens=False)) for text in texts]
                 if any(length + cfg["max_tokens"] > cfg["max_model_len"] for length in lengths):
                     raise ValueError("Audit context budget exceeded; no silent truncation")
@@ -503,6 +506,12 @@ class RealBackend:
         return result
 
     def _vllm(self, cfg):
+        if cfg.get("vllm_version"):
+            from research_runner.modern_audit import check_version
+            check_version(cfg)
+        if cfg.get("structured_output_api") == "structured_outputs":
+            from research_runner.modern_audit import modern_vllm
+            return modern_vllm(self, cfg)
         from vllm import LLM, SamplingParams
         from vllm.sampling_params import GuidedDecodingParams
 
@@ -532,6 +541,9 @@ class RealBackend:
 
 def _audit_config(config):
     config = dict(config)
+    from research_runner.modern_audit import OPTION_KEYS, validate_options
+    if OPTION_KEYS.intersection(config):
+        validate_options(config)
     if any(key in config for key in ("api_key", "token", "authorization")):
         raise ValueError("Audit credentials must come from api_key_env, never configuration")
     prompt = config.get("prompt", config.get("system_prompt"))

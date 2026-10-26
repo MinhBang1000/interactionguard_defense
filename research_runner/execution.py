@@ -46,6 +46,8 @@ class ProcessExecutor:
             require_idle_gpu(self.config)
         runtime = self.config['runtime']
         python = runtime['audit_python'] if llm else runtime['python']
+        if llm and (job.get('backend') or {}).get('python'):
+            python = job['backend']['python']
         if not Path(python).is_file():
             raise RuntimeError(f'Configured Python interpreter is unavailable: {python}')
         print(f'Starting {operation} worker. Log: {destination / "worker.log"}', flush=True)
@@ -55,6 +57,9 @@ class ProcessExecutor:
                            TOKENIZERS_PARALLELISM='false', HF_HUB_OFFLINE='1',
                            TRANSFORMERS_OFFLINE='1', VLLM_WORKER_MULTIPROC_METHOD='spawn')
         environment['IG_PROGRESS_DIR'] = str(destination / 'progress')
+        if llm and backend.get('structured_output_api') == 'structured_outputs':
+            from research_runner.runtime_environment import worker_environment
+            environment = worker_environment(python, backend, environment)
         try:
             logged_process([python, '-u', '-m', 'research_runner.worker', str(spec)],
                            destination / 'worker.log', phase=f'{operation} worker',
@@ -65,3 +70,8 @@ class ProcessExecutor:
         if not result.is_file():
             raise RuntimeError(f'Worker exited without a completion result: {result}')
         return json.loads(result.read_text())
+
+    def preflight_audit(self, candidates):
+        """Check every environment and local snapshot before the first GPU call."""
+        from research_runner.backend_setup import check_candidates
+        return check_candidates(self.config, candidates)
